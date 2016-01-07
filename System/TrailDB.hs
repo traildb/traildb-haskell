@@ -23,7 +23,7 @@
 -- `Word8` for field index. This can cause some noise in your code.
 -- 
 -- Some of the key functions in reading TrailDBs are `openTrailDB`,
--- `decodeTrailDB`, `getFieldID`, `getItem` and possibly `getCookie`. Many
+-- `decodeTrailDB`, `getFieldID`, `getItem` and possibly `getUUID`. Many
 -- other functions are either conveniences or not useful in every application.
 --
 -- Here's an example program using relatively efficient, but low-level
@@ -72,12 +72,13 @@ module System.TrailDB
   -- * Constructing new TrailDBs
     newTrailDBCons
   , closeTrailDBCons
-  , addCookie
+  , addTrail
   , appendTdbToTdbCons
   , finalizeTrailDBCons
   -- * Opening existing TrailDBs
   , openTrailDB
   , closeTrailDB
+  , getTdbVersion
   , dontneedTrailDB
   , willneedTrailDB
   , withTrailDB
@@ -94,7 +95,6 @@ module System.TrailDB
   -- `foldTrailDB` is the most efficient function to traverse the entire
   -- TrailDB in Haskell at the moment.
   , decodeTrailDB
-  , foldTrailDB
   , foldOverTrailDB
   , foldOverTrailDBFile
   , foldOverTrailDBFile_
@@ -114,14 +114,14 @@ module System.TrailDB
   , field'
   , value'
   -- ** Basic querying
-  , getNumCookies
+  , getNumTrails
   , getNumEvents
   , getNumFields
   , getMinTimestamp
   , getMaxTimestamp
-  -- ** Cookie handling
-  , getCookie
-  , getCookieID
+  -- ** UUID handling
+  , getUUID
+  , getTrailID
   -- ** Fields
   , getFieldName
   , getFieldID
@@ -136,18 +136,18 @@ module System.TrailDB
   , tdbFunction
   , tdbFold
   -- * Data types
-  , Cookie
-  , CookieID
+  , UUID
+  , TrailID
   , Crumb
-  , FieldID
+  , TdbField
   , FieldName
   , FieldNameLike(..)
   , Feature()
   , featureWord
+  , featureTdbVal
   , Trail
   , TdbCons()
   , Tdb()
-  , Value
   -- ** Time
   , UnixTime
   , getUnixTime
@@ -173,9 +173,7 @@ import qualified Data.ByteString.Unsafe as B
 import qualified Data.ByteString.Lazy as BL
 import Data.Bits
 import Data.Coerce
-import Data.Foldable
 import Data.Data
-import Data.IORef
 import Data.Monoid
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
@@ -190,9 +188,8 @@ import Foreign.C.String
 import Foreign.C.Types
 import Foreign.ForeignPtr
 import Foreign.Marshal.Alloc
-import Foreign.Marshal.Utils
+import Foreign.Marshal.Array
 import Foreign.Ptr
-import Foreign.StablePtr
 import Foreign.Storable
 import GHC.Generics
 import System.Directory
@@ -200,21 +197,30 @@ import System.IO.Error
 import System.IO.Unsafe
 import System.Posix.Files.ByteString
 
+import System.TrailDB.Error
 import System.TrailDB.Internal
 
-foreign import ccall unsafe tdb_cons_new
-  :: Ptr CChar
-  -> Ptr CChar
-  -> Word32
-  -> IO (Ptr TdbConsRaw)
-foreign import ccall unsafe tdb_cons_free
+-- Raw types (tdb_types.h)
+type TdbField = Word32
+type TdbVal = Word64
+type TdbItem = Word64
+
+foreign import ccall unsafe tdb_cons_init
+  :: IO (Ptr TdbConsRaw)
+foreign import ccall unsafe tdb_cons_open
   :: Ptr TdbConsRaw
-  -> IO ()
+  -> Ptr CChar
+  -> Ptr (Ptr CChar)
+  -> Word64
+  -> IO CInt
+foreign import ccall unsafe tdb_cons_close
+  :: Ptr TdbConsRaw -> IO ()
 foreign import ccall unsafe tdb_cons_add
   :: Ptr TdbConsRaw
   -> Ptr Word8
-  -> Word32
-  -> Ptr CChar
+  -> Word64
+  -> Ptr (Ptr CChar)
+  -> Ptr Word64
   -> IO CInt
 foreign import ccall safe tdb_cons_finalize
   :: Ptr TdbConsRaw
@@ -230,76 +236,73 @@ foreign import ccall unsafe tdb_dontneed
 foreign import ccall unsafe tdb_willneed
   :: Ptr TdbRaw
   -> IO ()
+foreign import ccall unsafe tdb_init
+  :: IO (Ptr TdbRaw)
 foreign import ccall safe tdb_open
-  :: Ptr CChar
-  -> IO (Ptr TdbRaw)
+  :: Ptr TdbRaw
+  -> Ptr CChar
+  -> IO CInt
 foreign import ccall safe tdb_close
   :: Ptr TdbRaw
   -> IO ()
+--foreign import ccall unsafe tdb_lexicon_size
+--  :: Ptr TdbRaw
+--  -> TdbField
+--  -> IO Word64
 foreign import ccall unsafe tdb_decode_trail
   :: Ptr TdbRaw
   -> Word64
-  -> Ptr Word32
-  -> Word32
+  -> Ptr TdbItem
+  -> Word64
+  -> Ptr Word64
   -> CInt
-  -> IO Word32
-foreign import ccall unsafe tdb_get_cookie_id
+  -> IO CInt
+foreign import ccall unsafe tdb_get_trail_id
   :: Ptr TdbRaw
   -> Ptr Word8
   -> IO Word64
-foreign import ccall unsafe tdb_get_cookie
+foreign import ccall unsafe tdb_get_uuid
   :: Ptr TdbRaw
   -> Word64
   -> IO (Ptr Word8)
-foreign import ccall unsafe tdb_num_cookies
+foreign import ccall unsafe tdb_num_trails
   :: Ptr TdbRaw -> IO Word64
 foreign import ccall unsafe tdb_num_events
   :: Ptr TdbRaw -> IO Word64
 foreign import ccall unsafe tdb_num_fields
-  :: Ptr TdbRaw -> IO Word32
+  :: Ptr TdbRaw -> IO Word64
 foreign import ccall unsafe tdb_min_timestamp
-  :: Ptr TdbRaw -> IO Word32
+  :: Ptr TdbRaw -> IO Word64
 foreign import ccall unsafe tdb_max_timestamp
-  :: Ptr TdbRaw -> IO Word32
-foreign import ccall unsafe tdb_get_field_name
-  :: Ptr TdbRaw
-  -> Word8
-  -> IO (Ptr CChar)
+  :: Ptr TdbRaw -> IO Word64
+foreign import ccall unsafe tdb_version
+  :: Ptr TdbRaw -> IO Word64
 foreign import ccall unsafe tdb_get_field
   :: Ptr TdbRaw
   -> Ptr CChar
+  -> Ptr TdbField
   -> IO CInt
+foreign import ccall unsafe tdb_get_field_name
+  :: Ptr TdbRaw
+  -> TdbField
+  -> IO (Ptr CChar)
 foreign import ccall unsafe tdb_get_item_value
   :: Ptr TdbRaw
-  -> Word32
+  -> TdbItem
+  -> Ptr Word64
   -> IO (Ptr CChar)
 foreign import ccall unsafe tdb_get_item
   :: Ptr TdbRaw
-  -> Word8
+  -> TdbField
   -> Ptr CChar
-  -> IO Word32
+  -> Word64
+  -> IO TdbItem
 
-foreign import ccall safe tdb_fold
-  :: Ptr TdbRaw
-  -> FunPtr TdbFoldFun
-  -> Ptr ()
-  -> IO (Ptr ())
-
-foreign import ccall "wrapper" wrap_tdb_fold
-  :: TdbFoldFun
-  -> IO (FunPtr TdbFoldFun)
-
-type TdbFoldFun = Ptr TdbRaw -> Word64 -> Ptr Word32 -> Ptr () -> IO (Ptr ())
-
--- | Cookies should be 16 bytes in size.
-type Cookie = B.ByteString
+-- | UUIDs should be 16 bytes in size.
+type UUID = B.ByteString
 type FieldName = B.ByteString
-type UnixTime = Word32
-
-type CookieID = Word64
-
-type FieldID = Word8
-type Value = Word32
+type UnixTime = Word64
+type TrailID = Word64
 
 -- | `Trail` is the list of all events (or crumbs) that have happened to a cookie.
 type Trail = [Crumb]
@@ -315,8 +318,8 @@ type Crumb = (UnixTime, V.Vector Feature)
 data TrailDBException
   = CannotOpenTrailDBCons   -- ^ Failed to open `TdbCons`.
   | CannotOpenTrailDB       -- ^ Failed to open `Tdb`.
-  | NoSuchCookieID          -- ^ A `CookieID` was used that doesn't exist in `Tdb`.
-  | NoSuchCookie            -- ^ A `Cookie` was used that doesn't exist in `Tdb`.
+  | NoSuchTrailID          -- ^ A `UUIDID` was used that doesn't exist in `Tdb`.
+  | NoSuchUUID            -- ^ A `UUID` was used that doesn't exist in `Tdb`.
   | NoSuchFieldID           -- ^ A `FieldID` was used that doesn't exist in `Tdb`.
   | NoSuchField             -- ^ A `Field` was used that doesn't exist in `Tdb`.
   | NoSuchValue             -- ^ A `Feature` was used that doesn't contain a valid value.
@@ -326,22 +329,26 @@ data TrailDBException
 
 instance Exception TrailDBException
 
-newtype Feature = Feature Word32
+newtype Feature = Feature TdbItem
   deriving ( Eq, Ord, Show, Read, Typeable, Data, Generic, Storable )
 
-featureWord :: Iso' Feature Word32
+featureWord :: Iso' Feature Word64
 featureWord = iso (\(Feature w) -> w) (\w -> Feature w)
 {-# INLINE featureWord #-}
 
-newtype instance V.Vector Feature = V_Feature (V.Vector Word32)
-newtype instance VM.MVector s Feature = VM_Feature (VM.MVector s Word32)
+featureTdbVal :: Iso' Feature TdbVal
+featureTdbVal = featureWord
+{-# INLINE featureTdbVal #-}
+
+newtype instance V.Vector Feature = V_Feature (V.Vector Word64)
+newtype instance VM.MVector s Feature = VM_Feature (VM.MVector s Word64)
 
 instance VGM.MVector VM.MVector Feature where
   {-# INLINE basicLength #-}
-  basicLength (VM_Feature w32) = VGM.basicLength w32
+  basicLength (VM_Feature w64) = VGM.basicLength w64
   {-# INLINE basicUnsafeSlice #-}
-  basicUnsafeSlice a b (VM_Feature w32) = coerce $
-    VGM.basicUnsafeSlice a b w32
+  basicUnsafeSlice a b (VM_Feature w64) = coerce $
+    VGM.basicUnsafeSlice a b w64
   {-# INLINE basicOverlaps #-}
   basicOverlaps (VM_Feature w1) (VM_Feature w2) = VGM.basicOverlaps w1 w2
   {-# INLINE basicUnsafeNew #-}
@@ -349,49 +356,49 @@ instance VGM.MVector VM.MVector Feature where
     result <- VGM.basicUnsafeNew sz
     return $ VM_Feature result
   {-# INLINE basicUnsafeRead #-}
-  basicUnsafeRead (VM_Feature w32) i = coerce <$> VGM.basicUnsafeRead w32 i
+  basicUnsafeRead (VM_Feature w64) i = coerce <$> VGM.basicUnsafeRead w64 i
   {-# INLINE basicUnsafeWrite #-}
-  basicUnsafeWrite (VM_Feature w32) i v =
-    VGM.basicUnsafeWrite w32 i (coerce v)
+  basicUnsafeWrite (VM_Feature w64) i v =
+    VGM.basicUnsafeWrite w64 i (coerce v)
 
 instance VG.Vector V.Vector Feature where
   {-# INLINE basicLength #-}
-  basicLength (V_Feature w32) = VG.basicLength w32
+  basicLength (V_Feature w64) = VG.basicLength w64
   {-# INLINE basicUnsafeFreeze #-}
-  basicUnsafeFreeze (VM_Feature w32) = do
-    result <- VG.basicUnsafeFreeze w32
-    return $ coerce (result :: V.Vector Word32)
+  basicUnsafeFreeze (VM_Feature w64) = do
+    result <- VG.basicUnsafeFreeze w64
+    return $ coerce (result :: V.Vector Word64)
   {-# INLINE basicUnsafeThaw #-}
-  basicUnsafeThaw (V_Feature w32) = do
-    result <- VG.basicUnsafeThaw w32
+  basicUnsafeThaw (V_Feature w64) = do
+    result <- VG.basicUnsafeThaw w64
     return $ coerce result
   {-# INLINE basicUnsafeIndexM #-}
-  basicUnsafeIndexM (V_Feature w32) idx =
-    fmap coerce $ VG.basicUnsafeIndexM w32 idx
+  basicUnsafeIndexM (V_Feature w64) idx =
+    fmap coerce $ VG.basicUnsafeIndexM w64 idx
   {-# INLINE basicUnsafeSlice #-}
-  basicUnsafeSlice i1 i2 (V_Feature w32) =
-    coerce $ VG.basicUnsafeSlice i1 i2 w32
+  basicUnsafeSlice i1 i2 (V_Feature w64) =
+    coerce $ VG.basicUnsafeSlice i1 i2 w64
 
--- | `Feature` is isomorphic to `Word32` so it's safe to coerce between them. (see `featureWord`).
+-- | `Feature` is isomorphic to `Word64` so it's safe to coerce between them. (see `featureWord`).
 instance V.Unbox Feature
 
-field :: Lens' Feature FieldID
+field :: Lens' Feature TdbField
 field = lens field' (\(Feature old) new -> Feature $ (old .&. 0xffffff00) .|. fromIntegral new)
 {-# INLINE field #-}
 
-value :: Lens' Feature Value
+value :: Lens' Feature TdbVal
 value = lens value' (\(Feature old) new -> Feature $ (old .&. 0x000000ff) .|. (new `shiftL` 8))
 {-# INLINE value #-}
 
-field' :: Feature -> FieldID
+field' :: Feature -> TdbField
 field' (Feature w) = fromIntegral $ w .&. 0x000000ff
 {-# INLINE field' #-}
 
-value' :: Feature -> Value
+value' :: Feature -> TdbVal
 value' (Feature w) = w `shiftR` 8
 {-# INLINE value' #-}
 
-getUnixTime :: MonadIO m => m Word32
+getUnixTime :: MonadIO m => m Word64
 getUnixTime = liftIO $ do
   now <- getPOSIXTime
   let t = floor now
@@ -424,6 +431,13 @@ instance FieldNameLike TL.Text where
 newtype TdbCons = TdbCons (MVar (Maybe (Ptr TdbConsRaw)))
   deriving ( Typeable, Generic )
 
+tdbThrowIfError :: MonadIO m => m CInt -> m ()
+tdbThrowIfError action = do
+  result <- action
+  if result == 0
+    then return ()
+    else liftIO $ throwM $ TrailDBError result
+
 -- | Create a new TrailDB and return TrailDB construction handle.
 --
 -- Close it with `closeTrailDBCons`. Garbage collector will close it eventually
@@ -437,64 +451,68 @@ newTrailDBCons :: (FieldNameLike a, MonadIO m)
                -> m TdbCons
 newTrailDBCons filepath fields' = liftIO $ mask_ $
   withCString filepath $ \root ->
-    allocaBytes fields_length_with_nulls $ \ofield_names -> do
-      layoutNames fields ofield_names
-      tdb_cons <- tdb_cons_new root ofield_names (fromIntegral $ length fields)
-
+    withBytestrings fields $ \fields_ptr -> do
+      tdb_cons <- tdb_cons_init
       when (tdb_cons == nullPtr) $
         throwM CannotOpenTrailDBCons
 
-      -- MVar will protect the handle from being used in multiple threads
-      -- simultaneously.
-      mvar <- newMVar (Just tdb_cons)
+      flip onException (tdb_cons_close tdb_cons) $ do
+        tdbThrowIfError $ tdb_cons_open
+            tdb_cons
+            root
+            fields_ptr
+            (fromIntegral $ length fields)
 
-      -- Make garbage collector close it if it wasn't already.
-      void $ mkWeakMVar mvar $ modifyMVar_ mvar $ \case
-        Nothing -> return Nothing
-        Just ptr -> do
-          void $ tdb_cons_finalize ptr 0
-          tdb_cons_free ptr
-          return Nothing
+        -- MVar will protect the handle from being used in multiple threads
+        -- simultaneously.
+        mvar <- newMVar (Just tdb_cons)
 
-      return $ TdbCons mvar
+        -- Make garbage collector close it if it wasn't already.
+        void $ mkWeakMVar mvar $ modifyMVar_ mvar $ \case
+          Nothing -> return Nothing
+          Just ptr -> do
+            void $ tdb_cons_finalize ptr 0
+            tdb_cons_close ptr
+            return Nothing
+
+        return $ TdbCons mvar
  where
-  fields_length_with_nulls =
-    sum (fmap ((+1) . B.length) fields)
   fields = fmap encodeToFieldName fields'
 
-layoutNames :: MonadIO m => [B.ByteString] -> Ptr CChar -> m ()
-layoutNames [] _ = return ()
-layoutNames (bstr:rest) ptr = liftIO $ do
-  sz <- B.unsafeUseAsCStringLen bstr $ \(cstr, sz) -> do
-    copyBytes ptr cstr sz
-    pokeElemOff ptr sz 0
-    return sz
-  layoutNames rest (plusPtr ptr (sz+1))
-{-# INLINE layoutNames #-}
+withBytestrings :: forall a. [B.ByteString] -> (Ptr (Ptr CChar) -> IO a) -> IO a
+withBytestrings [] action = action nullPtr
+withBytestrings listing action =
+  allocaArray (length listing) $ \bs_ptr -> loop_it bs_ptr listing 0
+ where
+  loop_it :: Ptr (Ptr CChar) -> [B.ByteString] -> Int -> IO a
+  loop_it bs_ptr (bs:rest) idx = do
+    B.useAsCString bs $ \string_ptr -> do
+      pokeElemOff bs_ptr idx string_ptr
+      loop_it bs_ptr rest (idx+1)
+  loop_it bs_ptr [] _ = action bs_ptr
 
 -- | Add a cookie with timestamp and values to `TdbCons`.
-addCookie :: MonadIO m
-          => TdbCons
-          -> Cookie
-          -> UnixTime
-          -> [B.ByteString]
-          -> m ()
-addCookie _ cookie _ _ | B.length cookie /= 16 =
-  error "addCookie: cookie must be 16 bytes in length."
-addCookie (TdbCons mvar) cookie epoch values = liftIO $ withMVar mvar $ \case
-  Nothing -> error "addCookie: tdb_cons is closed."
+addTrail :: MonadIO m
+            => TdbCons
+            -> UUID
+            -> UnixTime
+            -> [B.ByteString]
+            -> m ()
+addTrail _ cookie _ _ | B.length cookie /= 16 =
+  error "addTrail: cookie must be 16 bytes in length."
+addTrail (TdbCons mvar) cookie epoch values = liftIO $ withMVar mvar $ \case
+  Nothing -> error "addTrail: tdb_cons is closed."
   Just ptr ->
     B.unsafeUseAsCString cookie $ \cookie_ptr ->
-      allocaBytes bytes_required $ \values_ptr -> do
-        layoutNames values values_ptr
-
-        -- tdb_cons_add doesn't seem to have failure conditions.
-        -- at least not any communicated through return value (it always
-        -- returns 0).
-        void $ tdb_cons_add ptr (castPtr cookie_ptr) epoch values_ptr
- where
-  bytes_required = sum $ fmap ((+1) . B.length) values
-{-# INLINE addCookie #-}
+      withBytestrings values $ \values_ptr -> do
+       withArray (fmap (fromIntegral . B.length) values) $ \values_length_ptr ->
+        tdbThrowIfError $ tdb_cons_add
+                            ptr
+                            (castPtr cookie_ptr)
+                            epoch
+                            values_ptr
+                            values_length_ptr
+{-# INLINE addTrail #-}
 
 -- | Finalizes a `TdbCons`.
 --
@@ -516,7 +534,7 @@ closeTrailDBCons (TdbCons mvar) = liftIO $ mask_ $ modifyMVar_ mvar $ \case
   Just ptr -> do
     result <- tdb_cons_finalize ptr 0
     unless (result == 0) $ throwM FinalizationFailure
-    tdb_cons_free ptr >> return Nothing
+    tdb_cons_close ptr >> return Nothing
 
 -- | Appends a `Tdb` to an open `TdbCons`.
 appendTdbToTdbCons :: MonadIO m
@@ -539,23 +557,26 @@ openTrailDB :: MonadIO m
             -> m Tdb
 openTrailDB root = liftIO $ mask_ $
   withCString root $ \root_str -> do
-    tdb <- tdb_open root_str
-    when (tdb == nullPtr) $
-      throwM CannotOpenTrailDB
+    tdb <- tdb_init
+    flip onException (tdb_close tdb) $ do
+      tdbThrowIfError $ tdb_open tdb root_str
+      when (tdb == nullPtr) $
+        throwM CannotOpenTrailDB
 
-    buf <- mallocForeignPtrArray 1
+      buf <- mallocForeignPtrArray 1
 
     -- Protect concurrent access and attach a tdb_close to garbage collector
-    mvar <- newCVar (Just TdbState {
-        tdbPtr = tdb
-      , decodeBuffer = buf
-      , decodeBufferSize = 1
-      })
-    void $ mkWeakCVar mvar $ modifyCVar_ mvar $ \case
-      Nothing -> return Nothing
-      Just (tdbPtr -> ptr) -> tdb_close ptr >> return Nothing
+      mvar <- newCVar (Just TdbState {
+          tdbPtr = tdb
+        , decodeBuffer = buf
+        , decodeBufferSize = 1
+        })
 
-    return $ Tdb mvar
+      void $ mkWeakCVar mvar $ modifyCVar_ mvar $ \case
+        Nothing -> return Nothing
+        Just (tdbPtr -> ptr) -> tdb_close ptr >> return Nothing
+
+      return $ Tdb mvar
 
 -- | Hints that `Tdb` will not be accessed in near future.
 --
@@ -583,22 +604,22 @@ closeTrailDB (Tdb mvar) = liftIO $ mask_ $ modifyCVar_ mvar $ \case
   Nothing -> return Nothing
   Just (tdbPtr -> ptr) -> tdb_close ptr >> return Nothing
 
--- | Fetches a trail by `CookieID`.
+-- | Fetches a trail by `UUIDID`.
 --
 -- TrailDB is designed to have good random access performance so mass querying
 -- is somewhat practical with this function.
 decodeTrailDB :: MonadIO m
               => Tdb
-              -> CookieID
+              -> TrailID
               -> m Trail
 decodeTrailDB tdb@(Tdb mvar) cid = liftIO $ join $ modifyCVar mvar $ \case
   Nothing -> error "decodeTrailDB: tdb is closed."
   old_st@(Just st) -> do
     let ptr = tdbPtr st
-    withForeignPtr (decodeBuffer st) $ \decode_buffer -> do
-      result <- tdb_decode_trail ptr cid decode_buffer (fromIntegral $ decodeBufferSize st) 0
-      when (result == 0) $
-        throwM NoSuchCookieID
+    withForeignPtr (decodeBuffer st) $ \decode_buffer ->
+     alloca $ \num_items_ptr -> do
+      tdbThrowIfError $ tdb_decode_trail ptr cid decode_buffer (fromIntegral $ decodeBufferSize st) num_items_ptr 0
+      result <- peek num_items_ptr
       if result == decodeBufferSize st
         then grow st
         else do results <- process decode_buffer 0 $ fromIntegral result
@@ -632,36 +653,36 @@ withTdb (Tdb mvar) errstring action = liftIO $ withCVar mvar $ \case
   Just (tdbPtr -> ptr) -> action ptr
 {-# INLINE withTdb #-}
 
--- | Finds a cookie by cookie ID.
-getCookie :: MonadIO m => Tdb -> CookieID -> m Cookie
-getCookie tdb cid = withTdb tdb "getCookie" $ \ptr -> do
-  cptr <- tdb_get_cookie ptr cid
+-- | Finds a uuid by trail ID.
+getUUID :: MonadIO m => Tdb -> TrailID -> m UUID
+getUUID tdb cid = withTdb tdb "getUUID" $ \ptr -> do
+  cptr <- tdb_get_uuid ptr cid
   when (cptr == nullPtr) $
-    throwM NoSuchCookieID
+    throwM NoSuchTrailID
   B.packCStringLen (castPtr cptr, 16)
-{-# INLINE getCookie #-}
+{-# INLINE getUUID #-}
 
--- | Find a cookie ID by cookie.
-getCookieID :: MonadIO m => Tdb -> Cookie -> m CookieID
-getCookieID _ cookie | B.length cookie /= 16 = error "getCookieID: cookie must be 16 bytes in length."
-getCookieID tdb cookie = withTdb tdb "getCookieID" $ \ptr ->
+-- | Finds a trail ID by uuid.
+getTrailID :: MonadIO m => Tdb -> UUID -> m TrailID
+getTrailID _ cookie | B.length cookie /= 16 = error "getTrailID: cookie must be 16 bytes in length."
+getTrailID tdb cookie = withTdb tdb "getTrailID" $ \ptr ->
   B.unsafeUseAsCString cookie $ \cookie_str -> do
-    result <- tdb_get_cookie_id ptr (castPtr cookie_str)
+    result <- tdb_get_trail_id ptr (castPtr cookie_str)
     if result == 0xffffffffffffffff
-      then throwM NoSuchCookie
+      then throwM NoSuchUUID
       else return result
-{-# INLINE getCookieID #-}
+{-# INLINE getTrailID #-}
 
 -- | Returns the number of cookies in `Tdb`
-getNumCookies :: MonadIO m => Tdb -> m Word64
-getNumCookies tdb = withTdb tdb "getNumCookies" tdb_num_cookies
+getNumTrails :: MonadIO m => Tdb -> m Word64
+getNumTrails tdb = withTdb tdb "getNumTrails" tdb_num_trails
 
 -- | Returns the number of events in `Tdb`
 getNumEvents :: MonadIO m => Tdb -> m Word64
 getNumEvents tdb = withTdb tdb "getNumEvents" tdb_num_events
 
 -- | Returns the number of fields in `Tdb`
-getNumFields :: MonadIO m => Tdb -> m Word32
+getNumFields :: MonadIO m => Tdb -> m Word64
 getNumFields tdb = withTdb tdb "getNumFields" tdb_num_fields
 
 -- | Returns the minimum timestamp in `Tdb`
@@ -672,19 +693,20 @@ getMinTimestamp tdb = withTdb tdb "getMinTimestamp" tdb_min_timestamp
 getMaxTimestamp :: MonadIO m => Tdb -> m UnixTime
 getMaxTimestamp tdb = withTdb tdb "getMaxTimestamp" tdb_max_timestamp
 
-getFieldName :: MonadIO m => Tdb -> FieldID -> m FieldName
+getFieldName :: MonadIO m => Tdb -> TdbField -> m FieldName
 getFieldName tdb fid = withTdb tdb "getFieldName" $ \ptr -> do
   result <- tdb_get_field_name ptr fid
   when (result == nullPtr) $ throwM NoSuchFieldID
   B.packCString result
 
 -- | Given a field name, returns its `FieldID`.
-getFieldID :: (FieldNameLike a, MonadIO m) => Tdb -> a -> m FieldID
+getFieldID :: (FieldNameLike a, MonadIO m) => Tdb -> a -> m TdbField
 getFieldID tdb (encodeToFieldName -> field_name) = withTdb tdb "getFieldID" $ \ptr ->
   B.useAsCString field_name $ \field_name_cstr -> do
-    result <- tdb_get_field ptr field_name_cstr
-    when (result == -1) $ throwM NoSuchField
-    return $ fromIntegral result-1
+    alloca $ \field_ptr -> do
+      tdbThrowIfError $ tdb_get_field ptr field_name_cstr field_ptr
+      result <- peek field_ptr
+      return $ fromIntegral $ result-1
 
 -- | Given a `Feature`, returns a string that describes it.
 --
@@ -692,16 +714,18 @@ getFieldID tdb (encodeToFieldName -> field_name) = withTdb tdb "getFieldID" $ \p
 -- be human-readable.
 getValue :: MonadIO m => Tdb -> Feature -> m B.ByteString
 getValue tdb (Feature ft) = withTdb tdb "getValue" $ \ptr -> do
-  cstr <- tdb_get_item_value ptr ft
-  when (cstr == nullPtr) $ throwM NoSuchValue
-  B.packCString cstr
+  alloca $ \len_ptr -> do
+    cstr <- tdb_get_item_value ptr ft len_ptr
+    when (cstr == nullPtr) $ throwM NoSuchValue
+    len <- peek len_ptr
+    B.packCStringLen (cstr, fromIntegral len)
 {-# INLINE getValue #-}
 
 -- | Given a field ID and a human-readable value, turn it into `Feature` for that field ID.
-getItem :: MonadIO m => Tdb -> FieldID -> B.ByteString -> m Feature
+getItem :: MonadIO m => Tdb -> TdbField -> B.ByteString -> m Feature
 getItem tdb fid bs = withTdb tdb "getItem" $ \ptr -> do
-  B.useAsCString bs $ \cstr -> do
-    ft <- tdb_get_item ptr (fid+1) cstr
+  B.unsafeUseAsCStringLen bs $ \(cstr, len) -> do
+    ft <- tdb_get_item ptr (fid+1) cstr (fromIntegral len)
     if ft == 0
       then throwM NoSuchFeature
       else return $ Feature ft
@@ -796,72 +820,28 @@ withRawTdb tdb action = do
   ptr <- getRawTdb tdb
   liftIO $ finally (action ptr) (touchTdb tdb) 
 
--- | Folds over an opened TrailDB.
---
--- You cannot interrupt this fold. It uses callback mechanism from C back to
--- Haskell so throwing exceptions to it can result in Bad Things.
---
--- If this scares you, use the safer (but marginally slower) `foldOverTrailDB`
--- or `foldOverTrailDB_`, which can be run in a monad stack and interrupted as
--- you please.
-foldTrailDB :: Tdb
-            -> (CookieID -> Crumb -> a -> IO a)
-            -> a
-            -> IO a
-foldTrailDB (Tdb cvar) trailer initial_value = withCVar cvar $ \case
-  Nothing -> error "foldTrailDB: tdb is closed."
-  Just tdbstate -> mask_ $ do
-    ref <- newIORef initial_value
-    num_fields <- fromIntegral <$> tdb_num_fields (tdbPtr tdbstate)
-    value_ptr <- newStablePtr ref
-    funwrap <- wrap_tdb_fold (hfun num_fields)
-    flip finally (freeStablePtr value_ptr >> freeHaskellFunPtr funwrap) $ do
-      _ <- tdb_fold (tdbPtr tdbstate)
-                    funwrap
-                    (castStablePtrToPtr value_ptr)
-      touch cvar
-      readIORef ref
- where
-  hfun :: Int -> TdbFoldFun
-  hfun num_fields _ cid fields user_args = do
-    value_ref <- deRefStablePtr $ castPtrToStablePtr user_args
-    value <- readIORef value_ref
-    time_stamp <- peekElemOff fields 0
-    
-    features_vector <- VM.unsafeNew (num_fields-1)
-    for_ [1..num_fields-1] $ \field_index -> do
-      feat <- Feature <$> peekElemOff fields field_index
-      VM.unsafeWrite features_vector (field_index-1) feat
-
-    frozen_vector <- V.unsafeFreeze features_vector
-
-    new_value <- trailer cid (time_stamp, frozen_vector) value
-    writeIORef value_ref new_value
-    return user_args
-{-# INLINE foldTrailDB #-}
-
 -- | Convenience function that folds over all trails in a `Tdb`.
 foldOverTrailDB :: MonadIO m
                 => Tdb
-                -> (CookieID -> Trail -> a -> m a)
+                -> (TrailID -> Trail -> a -> m a)
                 -> a
                 -> m a
 foldOverTrailDB tdb folder accum = do
-  num_cookies <- getNumCookies tdb
-  loop_it tdb folder 0 num_cookies accum
+  num_trails <- getNumTrails tdb
+  loop_it tdb folder 0 num_trails accum
  where
-  loop_it _ _ n num_cookies !accum | n >= num_cookies = return accum
-  loop_it tdb folder n num_cookies !accum = do
+  loop_it _ _ n num_trails !accum | n >= num_trails = return accum
+  loop_it tdb folder n num_trails !accum = do
     trail <- decodeTrailDB tdb n
     new_accum <- folder n trail accum
-    loop_it tdb folder (n+1) num_cookies new_accum
+    loop_it tdb folder (n+1) num_trails new_accum
 {-# INLINE foldOverTrailDB #-}
 
 -- | Same as `foldOverTrailDB` but opens `Tdb` from a file and closes it after
 -- it is done.
 foldOverTrailDBFile :: (MonadIO m, MonadMask m)
                     => FilePath
-                    -> (Tdb -> m (CookieID -> Trail -> a -> m a)) -- ^ Return a folder for the `Tdb`. This allows you to do some setup for your folder based on `Tdb`.
+                    -> (Tdb -> m (TrailID -> Trail -> a -> m a)) -- ^ Return a folder for the `Tdb`. This allows you to do some setup for your folder based on `Tdb`.
                     -> a
                     -> m a
 foldOverTrailDBFile fpath folder_creator initial_value =
@@ -876,7 +856,7 @@ foldOverTrailDBFile fpath folder_creator initial_value =
 -- it's difficult to make your folder look up features efficiently.
 foldOverTrailDBFile_ :: (MonadIO m, MonadMask m)
                      => FilePath
-                     -> (CookieID -> Trail -> a -> m a)
+                     -> (TrailID -> Trail -> a -> m a)
                      -> a
                      -> m a
 foldOverTrailDBFile_ fpath folder initial_value =
@@ -897,26 +877,26 @@ crumbs = each
 --
 -- However, the purity can be a major convenience if your `Tdb` is stable and
 -- you won't close it manually.
-tdbFunction :: Tdb -> (CookieID -> Maybe Trail)
+tdbFunction :: Tdb -> (TrailID -> Maybe Trail)
 tdbFunction tdb cid = unsafePerformIO $ do
   catch (Just <$> decodeTrailDB tdb cid)
-        (\NoSuchCookieID -> return Nothing)
+        (\NoSuchTrailID -> return Nothing)
 {-# INLINE tdbFunction #-}
 
 -- | Returns a pure `Fold` for `Tdb`. Same caveats as listed in `tdbFunction` apply.
-tdbFold :: Fold Tdb (CookieID, Trail)
+tdbFold :: Fold Tdb (TrailID, Trail)
 tdbFold fun tdb = unsafePerformIO $ do
-  cookies <- getNumCookies tdb
-  if cookies == 0
+  trails <- getNumTrails tdb
+  if trails == 0
     then return $ pure tdb
     else do first_trail <- unsafeInterleaveIO $ decodeTrailDB tdb 0
             let first_result = fun (0, first_trail)
-            (first_result *>) <$> unsafeInterleaveIO (loop_it 1 cookies)
+            (first_result *>) <$> unsafeInterleaveIO (loop_it 1 trails)
  where
-  loop_it n cookies | n >= cookies = return (pure tdb)
-  loop_it n cookies = do
+  loop_it n trails | n >= trails = return (pure tdb)
+  loop_it n trails = do
     trail <- unsafeInterleaveIO $ decodeTrailDB tdb n
-    (fun (n, trail) *>) <$> unsafeInterleaveIO (loop_it (n+1) cookies)
+    (fun (n, trail) *>) <$> unsafeInterleaveIO (loop_it (n+1) trails)
 {-# INLINE tdbFold #-}
 
 -- | Opens a `Tdb` and then closes it after action is over.
@@ -970,4 +950,7 @@ filterTrailDBDirectories = filterM $ \dir -> do
     Left CannotOpenTrailDB -> return False
     Left exc -> throwM exc
     Right ok -> closeTrailDB ok >> return True
+
+getTdbVersion :: MonadIO m => Tdb -> m Word64
+getTdbVersion tdb = withTdb tdb "getTdbVersion" tdb_version
 

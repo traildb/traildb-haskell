@@ -87,8 +87,8 @@ data TdbRaw
 
 data TdbState = TdbState
   { tdbPtr :: {-# UNPACK #-} !(Ptr TdbRaw)
-  , decodeBuffer :: {-# UNPACK #-} !(ForeignPtr Word32)
-  , decodeBufferSize :: {-# UNPACK #-} !Word32 }
+  , decodeBuffer :: {-# UNPACK #-} !(ForeignPtr Word64)
+  , decodeBufferSize :: {-# UNPACK #-} !Word64 }
 
 newtype Tdb = Tdb (CVar (Maybe TdbState))
   deriving ( Typeable, Generic )
