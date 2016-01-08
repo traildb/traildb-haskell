@@ -550,6 +550,8 @@ instance ToTdbRowField f => ToTdbRow [f] where
 -- are too long to implement `ToTdbRow`.
 data TdbConsRow a b = (:.) a b
 
+infixr 7 :.
+
 instance (ToTdbRowField a, ToTdbRow b)
        => ToTdbRow (TdbConsRow a b) where
   toTdbRow (a :. b) = toTdbField a:toTdbRow b
