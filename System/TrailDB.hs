@@ -535,6 +535,10 @@ instance ToTdbRowField T.Text where
   toTdbField = T.encodeUtf8
   {-# INLINE toTdbField #-}
 
+instance ToTdbRowField TL.Text where
+  toTdbField = T.encodeUtf8 . TL.toStrict
+  {-# INLINE toTdbField #-}
+
 instance ToTdbRowField f => ToTdbRow [f] where
   toTdbRow = fmap toTdbField
   {-# INLINE toTdbRow #-}
