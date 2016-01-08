@@ -3,10 +3,14 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE EmptyDataDecls #-}
+{-# LANGUAGE DeriveFoldable #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE BangPatterns #-}
@@ -75,6 +79,12 @@ module System.TrailDB
   , addTrail
   , appendTdbToTdbCons
   , finalizeTrailDBCons
+  -- ** Supplying values to construction
+  , ToTdbRow(..)
+  , ToTdbRowField(..)
+  , TdbConsRow(..)
+  , TdbShowable(..)
+  , pattern TShow
   -- * Opening existing TrailDBs
   , openTrailDB
   , closeTrailDB
@@ -491,16 +501,77 @@ withBytestrings listing action =
       loop_it bs_ptr rest (idx+1)
   loop_it bs_ptr [] _ = action bs_ptr
 
+class ToTdbRow r where
+  toTdbRow :: r -> [B.ByteString]
+
+class ToTdbRowField f where
+  toTdbField :: f -> B.ByteString
+
+instance (ToTdbRowField f1, ToTdbRowField f2) => ToTdbRow (f1, f2) where
+  toTdbRow (f1, f2) = toTdbRow [toTdbField f1, toTdbField f2]
+
+instance (ToTdbRowField f1, ToTdbRowField f2, ToTdbRowField f3) => ToTdbRow (f1, f2, f3) where
+  toTdbRow (f1, f2, f3) = toTdbRow [toTdbField f1, toTdbField f2, toTdbField f3]
+
+instance (ToTdbRowField f1, ToTdbRowField f2, ToTdbRowField f3, ToTdbRowField f4) => ToTdbRow (f1, f2, f3, f4) where
+  toTdbRow (f1, f2, f3, f4) = toTdbRow [toTdbField f1, toTdbField f2, toTdbField f3, toTdbField f4]
+
+instance (ToTdbRowField f1, ToTdbRowField f2, ToTdbRowField f3, ToTdbRowField f4, ToTdbRowField f5) => ToTdbRow (f1, f2, f3, f4, f5) where
+  toTdbRow (f1, f2, f3, f4, f5) = toTdbRow [toTdbField f1, toTdbField f2, toTdbField f3, toTdbField f4, toTdbField f5]
+
+instance ToTdbRowField B.ByteString where
+  toTdbField = id
+  {-# INLINE toTdbField #-}
+
+instance ToTdbRowField BL.ByteString where
+  toTdbField = BL.toStrict
+  {-# INLINE toTdbField #-}
+
+instance ToTdbRowField String where
+  toTdbField = T.encodeUtf8 . T.pack
+  {-# INLINE toTdbField #-}
+
+instance ToTdbRowField T.Text where
+  toTdbField = T.encodeUtf8
+  {-# INLINE toTdbField #-}
+
+instance ToTdbRowField f => ToTdbRow [f] where
+  toTdbRow = fmap toTdbField
+  {-# INLINE toTdbRow #-}
+
+-- | Convenience type that lets you arbitrarily make
+-- heterogenous list of things that implement `ToTdbRowField`
+-- and subsequently `ToTdbRow`. Use this if plain lists are
+-- not suitable (because they are monotyped) or your tuples
+-- are too long to implement `ToTdbRow`.
+data TdbConsRow a b = (:.) a b
+
+instance (ToTdbRowField a, ToTdbRow b)
+       => ToTdbRow (TdbConsRow a b) where
+  toTdbRow (a :. b) = toTdbField a:toTdbRow b
+  {-# INLINE toTdbRow #-}
+
+-- | Convenience newtype to put things that you can `Show` in TrailDB. It implements `ToTdbRowField`.
+newtype TdbShowable a = TdbShowable a
+  deriving ( Functor, Foldable, Traversable, Typeable, Generic, Eq, Ord, Show, Read )
+
+-- | Short-cut pattern synonym for `TdbShowable`
+pattern TShow a = TdbShowable a
+
+instance Show a => ToTdbRowField (TdbShowable a) where
+  toTdbField (TdbShowable thing) = toTdbField $ show thing
+  {-# INLINE toTdbField #-}
+
 -- | Add a cookie with timestamp and values to `TdbCons`.
-addTrail :: MonadIO m
-            => TdbCons
-            -> UUID
-            -> UnixTime
-            -> [B.ByteString]
-            -> m ()
+addTrail :: (MonadIO m, ToTdbRow r)
+         => TdbCons
+         -> UUID
+         -> UnixTime
+         -> r
+         -> m ()
 addTrail _ cookie _ _ | B.length cookie /= 16 =
   error "addTrail: cookie must be 16 bytes in length."
-addTrail (TdbCons mvar) cookie epoch values = liftIO $ withMVar mvar $ \case
+addTrail (TdbCons mvar) cookie epoch (toTdbRow -> values) = liftIO $ withMVar mvar $ \case
   Nothing -> error "addTrail: tdb_cons is closed."
   Just ptr ->
     B.unsafeUseAsCString cookie $ \cookie_ptr ->
