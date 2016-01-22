@@ -608,9 +608,7 @@ openTrailDB root = liftIO $ mask_ $
       when (tdb == nullPtr) $
         throwM CannotOpenTrailDB
 
-      putStrLn "HEllo1"
       tdbThrowIfError $ tdb_open tdb root_str
-      putStrLn "HEllo2"
 
       buf <- mallocForeignPtrArray 1
 
