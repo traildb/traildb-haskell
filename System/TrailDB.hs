@@ -19,56 +19,36 @@
 
 -- | Haskell bindings to trailDB library.
 --
--- The bindings are multithread-safe (a thread is blocked until another thread
--- has finished operation) and asynchronous exception-safe. Garbage collector
--- finalizers are used to clean up anything that was not manually closed.
---
--- These bindings use natively-sized integers in many functions, such as
--- `Word8` for field index. This can cause some noise in your code.
--- 
--- Some of the key functions in reading TrailDBs are `openTrailDB`,
--- `decodeTrailDB`, `getFieldID`, `getItem` and possibly `getUUID`. Many
--- other functions are either conveniences or not useful in every application.
---
--- Here's an example program using relatively efficient, but low-level
--- primitives that counts the number of 'Android' web browsers in a trailDB
--- containing a 'browser' field.
+-- Example program that reads a TrailDB:
 --
 -- @
--- {-\# LANGUAGE OverloadedStrings \#-}
--- {-\# LANGUAGE BangPatterns \#-}
+--   import qualified Data.ByteString as B
+--   import qualified Data.Vector.Unboxed as V
+--   import System.TrailDB
 --
--- import qualified Data.Vector.Unbox as V
--- import System.TrailDB
+--   main :: IO ()
+--   main = do
+--     tdb <- openTrailDB "some-trail-db"
+--     number_of_trails <- getNumTrails tdb
 --
--- countAndroids :: IO Int
--- countAndroids = withTrailDB "traildb-directory" $ \\tdb -> do
---   browser_field_id <- getFieldID tdb (\"browser\" :: String)
---   android_id <- getItem tdb browser_field_id \"Android\"
---   number_of_androids \<- flip (foldOverTrailDB tdb) 0 $ \\cookie_id trail !android_count -\> return $
---     (+android_count) $ sum $ fmap (\\(timestamp, features) -\>
---                    if features V.! fromIntegral browser_id_field == android_id
---                      then 1
---                      else 0) trail
---   return number_of_androids
--- @
+--     let arbitrarily_chosen_trail_id = 12345 `mod` number_of_trails
 --
--- And here's a second program, doing the exact same thing, but using fancy
--- (but somewhat unsafe) stuff. It's slightly slower than above program.
+--     cursor <- makeCursor tdb
+--     setCursor cursor arbitrarily_chosen_trail_id
 --
--- @
--- {-\# LANGUAGE OverloadedStrings \#-}
--- 
--- import Control.Exception ( evaluate )
--- import Control.Lens
--- import System.TrailDB
--- 
--- countAndroids :: IO Int
--- countAndroids = withTrailDB \"traildb-directory\" $ \\tdb -> do
---   browser_field_id <- getFieldID tdb (\"browser\" :: String)
---   android_id \<- getItem tdb browser_field_id \"Android\"
---   let answer = lengthOf (tdbFold._2.each.filtered (\crumb -> crumb^?_2.ix (fromIntegral browser_field_id) == Just android_id)) tdb
---   evaluate answer
+--     -- Read the first event in the arbitrary chosen trail
+--     crumb <- stepCursor cursor
+--     case crumb of
+--       Nothing -> putStrLn "No trail for this trail ID!"
+--       Just (timestamp, features) ->
+--         V.forM_ features $ \feature ->
+--           field_name <- getFieldName tdb (feature^.field)
+--           putStr "Field: "
+--           B.putStr field_name
+--           putStr " contains value "
+--           value <- getValue tdb feature
+--           B.putStrLn value
+--
 -- @
 
 module System.TrailDB
@@ -98,31 +78,9 @@ module System.TrailDB
   , touchTdb
   , TdbRaw
   -- * Accessing TrailDBs
-  -- | All the functions in this section get trails and crumbs from the TrailDB
-  -- with their cookie IDs but they differ in the way you invoke them.
-  -- 
-  -- `decodeTrailDB` is the function to use if you want random access.
-  -- `foldTrailDB` is the most efficient function to traverse the entire
-  -- TrailDB in Haskell at the moment.
-  , decodeTrailDB
-  , foldOverTrailDB
-  , foldOverTrailDBFile
-  , foldOverTrailDBFile_
-  -- ** Utilities
-  , findFromTrail
-  , findFromTrail_
-  , findFromCrumb
-  -- ** Folds, traversals
-  , feature
-  , timestamp
-  , crumbs
-  -- ** Feature manipulation
-  -- | `Feature` is internally a 32-bit integer containing an 8-bit field index
-  -- and a 24-bit value.
-  , field
-  , value
-  , field'
-  , value'
+  , makeCursor
+  , stepCursor
+  , setCursor
   -- ** Basic querying
   , getNumTrails
   , getNumEvents
@@ -138,13 +96,10 @@ module System.TrailDB
   , getItemByField
   , getValue
   , getItem
-  -- ** Lazy/unsafe functions
-  --
-  -- | These operations can break referential transparency if used incorrectly.
-  -- However, they can be rather convenient when you can use them safely as you
-  -- can pretend data in a `Tdb` is in memory and can be accessed purely.
-  , tdbFunction
-  , tdbFold
+  -- ** Taking apart `Feature`
+  , field
+  , value
+  , (^.)
   -- * Data types
   , UUID
   , TrailID
@@ -152,10 +107,8 @@ module System.TrailDB
   , TdbField
   , FieldName
   , FieldNameLike(..)
-  , Feature()
   , featureWord
   , featureTdbVal
-  , Trail
   , TdbCons()
   , Tdb()
   -- ** Time
@@ -184,6 +137,7 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Bits
 import Data.Coerce
 import Data.Data
+import Data.IORef
 import Data.Monoid
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
@@ -215,6 +169,8 @@ type TdbField = Word32
 type TdbVal = Word64
 type TdbItem = Word64
 
+foreign import ccall unsafe tdb_error_str
+  :: CInt -> IO (Ptr CChar)
 foreign import ccall unsafe tdb_cons_init
   :: IO (Ptr TdbConsRaw)
 foreign import ccall unsafe tdb_cons_open
@@ -255,18 +211,6 @@ foreign import ccall safe tdb_open
 foreign import ccall safe tdb_close
   :: Ptr TdbRaw
   -> IO ()
---foreign import ccall unsafe tdb_lexicon_size
---  :: Ptr TdbRaw
---  -> TdbField
---  -> IO Word64
-foreign import ccall unsafe tdb_decode_trail
-  :: Ptr TdbRaw
-  -> Word64
-  -> Ptr TdbItem
-  -> Word64
-  -> Ptr Word64
-  -> CInt
-  -> IO CInt
 foreign import ccall unsafe tdb_get_trail_id
   :: Ptr TdbRaw
   -> Ptr Word8
@@ -307,15 +251,41 @@ foreign import ccall unsafe tdb_get_item
   -> Ptr CChar
   -> Word64
   -> IO TdbItem
+foreign import ccall unsafe tdb_get_trail
+  :: Ptr TdbCursorRaw
+  -> Word64
+  -> IO CInt
+foreign import ccall unsafe tdb_cursor_new
+  :: Ptr TdbRaw
+  -> IO (Ptr TdbCursorRaw)
+foreign import ccall unsafe tdb_cursor_free
+  :: Ptr TdbCursorRaw
+  -> IO ()
+foreign import ccall unsafe tdb_get_trail_length
+  :: Ptr TdbCursorRaw
+  -> IO Word64
+foreign import ccall unsafe shim_tdb_cursor_next
+  :: Ptr TdbCursorRaw
+  -> IO (Ptr TdbEventRaw)
+foreign import ccall unsafe shim_tdb_item_to_field
+  :: Word64
+  -> Word32
+foreign import ccall unsafe shim_tdb_item_to_val
+  :: Word64
+  -> Word64
+foreign import ccall unsafe shim_tdb_field_val_to_item
+  :: Word32
+  -> Word64
+  -> Word64
+
+data TdbCursorRaw
+data TdbEventRaw
 
 -- | UUIDs should be 16 bytes in size.
 type UUID = B.ByteString
 type FieldName = B.ByteString
 type UnixTime = Word64
 type TrailID = Word64
-
--- | `Trail` is the list of all events (or crumbs) that have happened to a cookie.
-type Trail = [Crumb]
 
 -- | A single crumb is some event at certain time.
 --
@@ -392,28 +362,26 @@ instance VG.Vector V.Vector Feature where
 -- | `Feature` is isomorphic to `Word64` so it's safe to coerce between them. (see `featureWord`).
 instance V.Unbox Feature
 
-field :: Lens' Feature TdbField
-field = lens field' (\(Feature old) new -> Feature $ (old .&. 0xffffff00) .|. fromIntegral new)
-{-# INLINE field #-}
-
-value :: Lens' Feature TdbVal
-value = lens value' (\(Feature old) new -> Feature $ (old .&. 0x000000ff) .|. (new `shiftL` 8))
-{-# INLINE value #-}
-
-field' :: Feature -> TdbField
-field' (Feature w) = fromIntegral $ w .&. 0x000000ff
-{-# INLINE field' #-}
-
-value' :: Feature -> TdbVal
-value' (Feature w) = w `shiftR` 8
-{-# INLINE value' #-}
-
 getUnixTime :: MonadIO m => m Word64
 getUnixTime = liftIO $ do
   now <- getPOSIXTime
   let t = floor now
   return t
 {-# LANGUAGE getUnixTime #-}
+
+field :: Lens' Feature TdbField
+field = lens get_it set_it
+ where
+  get_it (Feature f) = shim_tdb_item_to_field f
+  set_it original@(Feature f) new = Feature $ shim_tdb_field_val_to_item new (original^.value)
+{-# INLINE field #-}
+
+value :: Lens' Feature TdbVal
+value = lens get_it set_it
+ where
+  get_it (Feature f) = shim_tdb_item_to_val f
+  set_it original@(Feature f) new = Feature $ shim_tdb_field_val_to_item (original^.field) new
+{-# INLINE value #-}
 
 -- | Class of things that can be used as a field name.
 --
@@ -446,7 +414,8 @@ tdbThrowIfError action = do
   result <- action
   if result == 0
     then return ()
-    else liftIO $ throwM $ TrailDBError result
+    else liftIO $ do err_string <- peekCString =<< tdb_error_str result
+                     throwM $ TrailDBError result err_string
 
 -- | Create a new TrailDB and return TrailDB construction handle.
 --
@@ -635,10 +604,13 @@ openTrailDB :: MonadIO m
 openTrailDB root = liftIO $ mask_ $
   withCString root $ \root_str -> do
     tdb <- tdb_init
-    flip onException (tdb_close tdb) $ do
-      tdbThrowIfError $ tdb_open tdb root_str
+    flip onException (when (tdb /= nullPtr) $ tdb_close tdb) $ do
       when (tdb == nullPtr) $
         throwM CannotOpenTrailDB
+
+      putStrLn "HEllo1"
+      tdbThrowIfError $ tdb_open tdb root_str
+      putStrLn "HEllo2"
 
       buf <- mallocForeignPtrArray 1
 
@@ -681,48 +653,52 @@ closeTrailDB (Tdb mvar) = liftIO $ mask_ $ modifyCVar_ mvar $ \case
   Nothing -> return Nothing
   Just (tdbPtr -> ptr) -> tdb_close ptr >> return Nothing
 
--- | Fetches a trail by `UUIDID`.
---
--- TrailDB is designed to have good random access performance so mass querying
--- is somewhat practical with this function.
-decodeTrailDB :: MonadIO m
-              => Tdb
-              -> TrailID
-              -> m Trail
-decodeTrailDB tdb@(Tdb mvar) cid = liftIO $ join $ modifyCVar mvar $ \case
-  Nothing -> error "decodeTrailDB: tdb is closed."
-  old_st@(Just st) -> do
-    let ptr = tdbPtr st
-    withForeignPtr (decodeBuffer st) $ \decode_buffer ->
-     alloca $ \num_items_ptr -> do
-      tdbThrowIfError $ tdb_decode_trail ptr cid decode_buffer (fromIntegral $ decodeBufferSize st) num_items_ptr 0
-      result <- peek num_items_ptr
-      if result == decodeBufferSize st
-        then grow st
-        else do results <- process decode_buffer 0 $ fromIntegral result
-                return (old_st, return results)
- where
-  grow st = do
-    let new_size = decodeBufferSize st * 2
-    ptr <- mallocForeignPtrArray $ fromIntegral new_size
-    return (Just st { decodeBufferSize = new_size
-                    , decodeBuffer = ptr }
-           ,decodeTrailDB tdb cid)
+data Cursor = Cursor !(Ptr TdbCursorRaw) !(IORef ()) !(MVar (Maybe TdbState))
+  deriving ( Eq, Typeable, Generic )
 
-  process !_ n l | n >= l = return []
-  process ptr n l = do
-    time_stamp <- peekElemOff ptr n
-    (item, new_n) <- process2 ptr (n+1) l
-    ((time_stamp, V.fromList item):) <$> process ptr new_n l
+-- | Creates a cursor to a trailDB.
+makeCursor :: MonadIO m
+           => Tdb
+           -> m Cursor
+makeCursor (Tdb mvar) = liftIO $ withCVar mvar $ \case
+  Nothing -> error "makeCursor: tdb is closed."
+  Just (tdbPtr -> tdb_ptr) -> mask_ $ do
+    cursor <- tdb_cursor_new tdb_ptr
+    cursor_fin <- newIORef ()
+    void $ mkWeakIORef cursor_fin $ tdb_cursor_free cursor
+    return $ Cursor cursor cursor_fin mvar
+{-# NOINLINE makeCursor #-}
 
-  process2 !_ n l | n >= l = return ([], n)
-  process2 ptr n l = do
-    feature <- peekElemOff ptr n
-    if feature == 0
-      then return ([], n+1)
-      else do (lst, new_n) <- process2 ptr (n+1) l
-              return $ (Feature feature:lst, new_n)
-{-# INLINE decodeTrailDB #-}
+stepCursor :: MonadIO m
+           => Cursor
+           -> m (Maybe Crumb)
+stepCursor (Cursor cursor mvar finalizer) = liftIO $ do
+  event_ptr <- shim_tdb_cursor_next cursor
+  if event_ptr /= nullPtr
+    then do let word64_ptr = castPtr event_ptr :: Ptr Word64
+            timestamp <- peekElemOff word64_ptr 0
+            num_items <- peekElemOff word64_ptr 1
+            let items = plusPtr word64_ptr (2*sizeOf (undefined :: Word64))
+              
+            vec <- V.generateM (fromIntegral num_items) $ peekElemOff items
+
+            touch mvar
+            touch finalizer
+
+            return $ Just (timestamp, vec)
+
+    else return Nothing
+{-# INLINE stepCursor #-}
+
+setCursor :: MonadIO m
+          => Cursor
+          -> TrailID
+          -> m ()
+setCursor (Cursor cursor mvar finalizer) trail_id = liftIO $ do
+  tdbThrowIfError $ tdb_get_trail cursor trail_id
+  touch mvar
+  touch finalizer
+{-# INLINE setCursor #-}
 
 withTdb :: MonadIO m => Tdb -> String -> (Ptr TdbRaw -> IO a) -> m a
 withTdb (Tdb mvar) errstring action = liftIO $ withCVar mvar $ \case
@@ -832,42 +808,6 @@ findFromCrumb fun (_, features) =
           else loop_it (n+1)
 {-# INLINE findFromCrumb #-}
 
--- | Finds a specific feature from a trail.
-findFromTrail :: (Feature -> Bool)
-              -> Trail
-              -> Maybe (Crumb, Feature)
-findFromTrail fun trail = loop_it trail
- where
-  loop_it [] = Nothing
-  loop_it (crumb:rest) =
-    case findFromCrumb fun crumb of
-      Nothing -> loop_it rest
-      Just feature -> Just (crumb, feature)
-{-# INLINE findFromTrail #-}
-
--- | Same as `findFromTrail` but does not return `Crumb` with the feature.
-findFromTrail_ :: (Feature -> Bool)
-               -> Trail
-               -> Maybe Feature
-findFromTrail_ fun trail = case findFromTrail fun trail of
-  Nothing -> Nothing
-  Just (_, feature) -> Just feature
-{-# INLINE findFromTrail_ #-}
-
--- | Traversal to features in a trail.
-feature :: Traversal' Trail Feature
-feature = each._2.each
-{-# INLINE feature #-}
-
--- | Traversal to timestamps in a trail
-timestamp :: Traversal' Trail UnixTime
-timestamp _ [] = pure []
-timestamp fun (crumb:rest) =
-  (:) <$> loop_it crumb <*> timestamp fun rest
- where
-  loop_it (tm, item) = (,) <$> fun tm <*> pure item
-{-# INLINE timestamp #-}
-
 -- | Returns the raw pointer to a TrailDB.
 --
 -- You can pass this pointer to C code and use the normal traildb functions to
@@ -896,85 +836,6 @@ withRawTdb :: MonadIO m => Tdb -> (Ptr TdbRaw -> IO a) -> m a
 withRawTdb tdb action = do
   ptr <- getRawTdb tdb
   liftIO $ finally (action ptr) (touchTdb tdb) 
-
--- | Convenience function that folds over all trails in a `Tdb`.
-foldOverTrailDB :: MonadIO m
-                => Tdb
-                -> (TrailID -> Trail -> a -> m a)
-                -> a
-                -> m a
-foldOverTrailDB tdb folder accum = do
-  num_trails <- getNumTrails tdb
-  loop_it tdb folder 0 num_trails accum
- where
-  loop_it _ _ n num_trails !accum | n >= num_trails = return accum
-  loop_it tdb folder n num_trails !accum = do
-    trail <- decodeTrailDB tdb n
-    new_accum <- folder n trail accum
-    loop_it tdb folder (n+1) num_trails new_accum
-{-# INLINE foldOverTrailDB #-}
-
--- | Same as `foldOverTrailDB` but opens `Tdb` from a file and closes it after
--- it is done.
-foldOverTrailDBFile :: (MonadIO m, MonadMask m)
-                    => FilePath
-                    -> (Tdb -> m (TrailID -> Trail -> a -> m a)) -- ^ Return a folder for the `Tdb`. This allows you to do some setup for your folder based on `Tdb`.
-                    -> a
-                    -> m a
-foldOverTrailDBFile fpath folder_creator initial_value =
-  withTrailDB fpath $ \tdb -> do
-    folder <- folder_creator tdb
-    foldOverTrailDB tdb folder initial_value
-{-# INLINE foldOverTrailDBFile #-}
-
--- | Same as `foldOverTrailDBFile` but you don't get to access `Tdb`.
---
--- This is simpler to invoke than `foldOverTrailDBFile` but lack setup may mean
--- it's difficult to make your folder look up features efficiently.
-foldOverTrailDBFile_ :: (MonadIO m, MonadMask m)
-                     => FilePath
-                     -> (TrailID -> Trail -> a -> m a)
-                     -> a
-                     -> m a
-foldOverTrailDBFile_ fpath folder initial_value =
-  withTrailDB fpath $ \tdb -> foldOverTrailDB tdb folder initial_value
-{-# INLINE foldOverTrailDBFile_ #-}
-
--- | Dive into crumbs in trail.
-crumbs :: Traversal' Trail Crumb
-crumbs = each
-{-# INLINE crumbs #-}
-
--- | Returns a pure function that returns trails from `Tdb`.
---
--- This function can be unsafe. If you close the `Tdb` and still use the
--- returned function, the function will break referential transparency by
--- throwing an exception. Same thing can happen if something happens to the
--- `Tdb` in the Real World, modifying results.
---
--- However, the purity can be a major convenience if your `Tdb` is stable and
--- you won't close it manually.
-tdbFunction :: Tdb -> (TrailID -> Maybe Trail)
-tdbFunction tdb cid = unsafePerformIO $ do
-  catch (Just <$> decodeTrailDB tdb cid)
-        (\NoSuchTrailID -> return Nothing)
-{-# INLINE tdbFunction #-}
-
--- | Returns a pure `Fold` for `Tdb`. Same caveats as listed in `tdbFunction` apply.
-tdbFold :: Fold Tdb (TrailID, Trail)
-tdbFold fun tdb = unsafePerformIO $ do
-  trails <- getNumTrails tdb
-  if trails == 0
-    then return $ pure tdb
-    else do first_trail <- unsafeInterleaveIO $ decodeTrailDB tdb 0
-            let first_result = fun (0, first_trail)
-            (first_result *>) <$> unsafeInterleaveIO (loop_it 1 trails)
- where
-  loop_it n trails | n >= trails = return (pure tdb)
-  loop_it n trails = do
-    trail <- unsafeInterleaveIO $ decodeTrailDB tdb n
-    (fun (n, trail) *>) <$> unsafeInterleaveIO (loop_it (n+1) trails)
-{-# INLINE tdbFold #-}
 
 -- | Opens a `Tdb` and then closes it after action is over.
 withTrailDB :: (MonadIO m, MonadMask m) => FilePath -> (Tdb -> m a) -> m a
