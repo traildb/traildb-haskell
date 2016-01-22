@@ -134,7 +134,6 @@ import Control.Monad.Trans.State.Strict
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Unsafe as B
 import qualified Data.ByteString.Lazy as BL
-import Data.Bits
 import Data.Coerce
 import Data.Data
 import Data.IORef
@@ -158,7 +157,6 @@ import Foreign.Storable
 import GHC.Generics
 import System.Directory
 import System.IO.Error
-import System.IO.Unsafe
 import System.Posix.Files.ByteString
 
 import System.TrailDB.Error
@@ -261,9 +259,6 @@ foreign import ccall unsafe tdb_cursor_new
 foreign import ccall unsafe tdb_cursor_free
   :: Ptr TdbCursorRaw
   -> IO ()
-foreign import ccall unsafe tdb_get_trail_length
-  :: Ptr TdbCursorRaw
-  -> IO Word64
 foreign import ccall unsafe shim_tdb_cursor_next
   :: Ptr TdbCursorRaw
   -> IO (Ptr TdbEventRaw)
@@ -373,14 +368,14 @@ field :: Lens' Feature TdbField
 field = lens get_it set_it
  where
   get_it (Feature f) = shim_tdb_item_to_field f
-  set_it original@(Feature f) new = Feature $ shim_tdb_field_val_to_item new (original^.value)
+  set_it original new = Feature $ shim_tdb_field_val_to_item new (original^.value)
 {-# INLINE field #-}
 
 value :: Lens' Feature TdbVal
 value = lens get_it set_it
  where
   get_it (Feature f) = shim_tdb_item_to_val f
-  set_it original@(Feature f) new = Feature $ shim_tdb_field_val_to_item (original^.field) new
+  set_it original new = Feature $ shim_tdb_field_val_to_item (original^.field) new
 {-# INLINE value #-}
 
 -- | Class of things that can be used as a field name.
@@ -788,23 +783,6 @@ getItemByField :: (FieldNameLike a, MonadIO m) => Tdb -> a -> B.ByteString -> m 
 getItemByField tdb (encodeToFieldName -> fid) bs = liftIO $ do
   fid <- getFieldID tdb fid
   getItem tdb fid bs
-
--- | Finds a specific feature from a crumb.
-findFromCrumb :: (Feature -> Bool)
-              -> Crumb
-              -> Maybe Feature
-findFromCrumb fun (_, features) =
-  loop_it 0
- where
-  len = V.length features
-
-  loop_it n | n >= len = Nothing
-  loop_it n =
-    let f = features V.! n
-     in if fun f
-          then Just f
-          else loop_it (n+1)
-{-# INLINE findFromCrumb #-}
 
 -- | Returns the raw pointer to a TrailDB.
 --
