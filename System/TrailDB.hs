@@ -41,7 +41,7 @@
 --     case crumb of
 --       Nothing -> putStrLn "No trail for this trail ID!"
 --       Just (timestamp, features) ->
---         V.forM_ features $ \feature ->
+--         V.forM_ features $ \feature -> do
 --           field_name <- getFieldName tdb (feature^.field)
 --           putStr "Field: "
 --           B.putStr field_name
@@ -50,12 +50,38 @@
 --           B.putStrLn value
 --
 -- @
+--
+-- Another example program that writes a TrailDB:
+--
+-- @
+--   {-# LANGUAGE OverloadedStrings #-}
+--
+--   import System.TrailDB
+--
+--   main :: IO ()
+--   main = do
+--     cons <- newTrailDBCons "some-trail-db" (["currency", "order_amount", "item"] :: [String])
+--     addTrail cons ("aaaaaaaaaaaaaa00")   -- UUIDs are 16 bytes in length
+--                   1457049455             -- This is timestamp
+--                   ["USD", "10.14", "Bacon & Cheese" :: String]
+--     addTrail cons ("aaaaaaaaaaaaaa00")   -- Same UUID as above, same customer ordered more
+--                   1457051221
+--                   ["USD", "8.90", "Avocado Sandwich" :: String]
+--     addTrail cons ("aaaaaaaaaaaaaa02")
+--                   1457031239
+--                   ["JPY", "2900", "Sun Lotion" :: String]
+--     closeTrailDBCons cons
+--
+--     -- TrailDB has been written to 'some-trail-db'
+-- @
+--
 
 module System.TrailDB
   ( 
   -- * Constructing new TrailDBs
     newTrailDBCons
   , closeTrailDBCons
+  , withTrailDBCons
   , addTrail
   , appendTdbToTdbCons
   , finalizeTrailDBCons
@@ -276,10 +302,14 @@ foreign import ccall unsafe shim_tdb_field_val_to_item
 data TdbCursorRaw
 data TdbEventRaw
 
--- | UUIDs should be 16 bytes in size.
+-- | UUIDs should be 16 bytes in size. It can be converted to `TrailID` within a traildb.
 type UUID = B.ByteString
+-- | Fields names are bytestring and can contain nulls.
 type FieldName = B.ByteString
+-- | The type of time used in traildbs.
 type UnixTime = Word64
+-- | `TrailID` indexes a trail in a traildb. It can be converted to and back to
+-- `UUID` within a traildb.
 type TrailID = Word64
 
 -- | A single crumb is some event at certain time.
@@ -287,23 +317,8 @@ type TrailID = Word64
 -- The vector always has length as told by `getNumFields`.
 type Crumb = (UnixTime, V.Vector Feature)
 
--- | Exceptions that may happen with TrailDBs.
---
--- Programming errors use `error` instead of throwing one of these exceptions.
-data TrailDBException
-  = CannotOpenTrailDBCons   -- ^ Failed to open `TdbCons`.
-  | CannotOpenTrailDB       -- ^ Failed to open `Tdb`.
-  | NoSuchTrailID          -- ^ A `UUIDID` was used that doesn't exist in `Tdb`.
-  | NoSuchUUID            -- ^ A `UUID` was used that doesn't exist in `Tdb`.
-  | NoSuchFieldID           -- ^ A `FieldID` was used that doesn't exist in `Tdb`.
-  | NoSuchField             -- ^ A `Field` was used that doesn't exist in `Tdb`.
-  | NoSuchValue             -- ^ A `Feature` was used that doesn't contain a valid value.
-  | NoSuchFeature           -- ^ Attempted to find `Feature` for human readable name that doesn't exist.
-  | FinalizationFailure     -- ^ For some reason, finalizing a `TdbCons` failed.
-  deriving ( Eq, Ord, Show, Read, Typeable, Data, Generic, Enum )
-
-instance Exception TrailDBException
-
+-- | `Feature` is a value in traildb. `getValue` can turn it into a
+-- human-readable value within a traildb.
 newtype Feature = Feature TdbItem
   deriving ( Eq, Ord, Show, Read, Typeable, Data, Generic, Storable )
 
@@ -428,7 +443,7 @@ newTrailDBCons filepath fields' = liftIO $ mask_ $
     withBytestrings fields $ \fields_ptr -> do
       tdb_cons <- tdb_cons_init
       when (tdb_cons == nullPtr) $
-        throwM CannotOpenTrailDBCons
+        throwM CannotAllocateTrailDBCons
 
       flip onException (tdb_cons_close tdb_cons) $ do
         tdbThrowIfError $ tdb_cons_open
@@ -453,6 +468,17 @@ newTrailDBCons filepath fields' = liftIO $ mask_ $
  where
   fields = fmap encodeToFieldName fields'
 
+-- | Runs an `IO` action with an opened `TdbCons`. The `TdbCons` is closed
+-- after the action has been executed.
+withTrailDBCons :: (FieldNameLike a, MonadIO m, MonadMask m)
+                => FilePath
+                -> [a]
+                -> (TdbCons -> m b)
+                -> m b
+withTrailDBCons filepath fields action = mask $ \restore -> do
+  cons <- newTrailDBCons filepath fields
+  finally (restore $ action cons) (closeTrailDBCons cons)
+  
 withBytestrings :: forall a. [B.ByteString] -> (Ptr (Ptr CChar) -> IO a) -> IO a
 withBytestrings [] action = action nullPtr
 withBytestrings listing action =
@@ -593,6 +619,10 @@ appendTdbToTdbCons (Tdb mvar_tdb) (TdbCons mvar_tdb_cons) = liftIO $
           error "appendTdbToTdbCons: tdb_cons_append() failed."
 
 -- | Opens an existing TrailDB.
+--
+-- It can open file TrailDBs and also directory TrailDBs.
+--
+-- In case of files you can use format \"traildb.tdb\" or just \"traildb\".
 openTrailDB :: MonadIO m
             => FilePath
             -> m Tdb
@@ -600,14 +630,13 @@ openTrailDB root = liftIO $ mask_ $
   withCString root $ \root_str -> do
     tdb <- tdb_init
     flip onException (when (tdb /= nullPtr) $ tdb_close tdb) $ do
-      when (tdb == nullPtr) $
-        throwM CannotOpenTrailDB
+      when (tdb == nullPtr) $ throwM CannotAllocateTrailDB
 
       tdbThrowIfError $ tdb_open tdb root_str
 
       buf <- mallocForeignPtrArray 1
 
-    -- Protect concurrent access and attach a tdb_close to garbage collector
+      -- Protect concurrent access and attach a tdb_close to garbage collector
       mvar <- newCVar (Just TdbState {
           tdbPtr = tdb
         , decodeBuffer = buf
@@ -622,6 +651,8 @@ openTrailDB root = liftIO $ mask_ $
 
 -- | Hints that `Tdb` will not be accessed in near future.
 --
+-- Internally may invoke system call \'madvise\' behind the scenes to operating system.
+--
 -- This has no effects on semantics, only performance.
 dontneedTrailDB :: MonadIO m
                 => Tdb
@@ -629,6 +660,8 @@ dontneedTrailDB :: MonadIO m
 dontneedTrailDB tdb = withTdb tdb "dontneedTrailDB" tdb_dontneed
 
 -- | Hints that `Tdb` will be walked over in near future.
+--
+-- Internally may invoke system call \'madvise\' behind the scenes to operating system.
 --
 -- This has no effects on semantics, only performance.
 willneedTrailDB :: MonadIO m
@@ -662,6 +695,9 @@ makeCursor (Tdb mvar) = liftIO $ withCVar mvar $ \case
     return $ Cursor cursor cursor_fin mvar
 {-# NOINLINE makeCursor #-}
 
+-- | Steps cursor forward in its trail.
+--
+-- Returns `Nothing` if there are no more crumbs in the trail.
 stepCursor :: MonadIO m
            => Cursor
            -> m (Maybe Crumb)
@@ -683,6 +719,7 @@ stepCursor (Cursor cursor mvar finalizer) = liftIO $ do
     else return Nothing
 {-# INLINE stepCursor #-}
 
+-- | Puts cursor at the start of some trail.
 setCursor :: MonadIO m
           => Cursor
           -> TrailID
@@ -856,12 +893,12 @@ findTrailDBs filepath follow_symbolic_links = do
 -- | Given a list of directories, filters it, returning only directories that
 -- are valid TrailDB directories.
 --
--- Used internally by `findTrailDBs` but is useful in general so we export it.
+-- Used internally by `findTrailDBs` but can be useful in general so we export it.
 filterTrailDBDirectories :: (MonadIO m, MonadMask m) => [FilePath] -> m [FilePath]
 filterTrailDBDirectories = filterM $ \dir -> do
   result <- try $ openTrailDB dir
   case result of
-    Left CannotOpenTrailDB -> return False
+    Left CannotAllocateTrailDB -> return False
     Left exc -> throwM exc
     Right ok -> closeTrailDB ok >> return True
 
