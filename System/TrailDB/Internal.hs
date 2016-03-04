@@ -82,7 +82,10 @@ withCVar cvar action = do
 withCVar cvar action = withMVar cvar action
 #endif
 
+-- | Represents the raw TrailDB construction as used in C.
 data TdbConsRaw
+
+-- | Represents the raw TrailDB handle as used in C.
 data TdbRaw
 
 data TdbState = TdbState

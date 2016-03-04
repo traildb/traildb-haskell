@@ -31,7 +31,7 @@
 --     tdb <- openTrailDB "some-trail-db"
 --     number_of_trails <- getNumTrails tdb
 --
---     let arbitrarily_chosen_trail_id = 12345 `mod` number_of_trails
+--     let arbitrarily_chosen_trail_id = 12345 \`mod\` number_of_trails
 --
 --     cursor <- makeCursor tdb
 --     setCursor cursor arbitrarily_chosen_trail_id
@@ -39,7 +39,7 @@
 --     -- Read the first event in the arbitrary chosen trail
 --     crumb <- stepCursor cursor
 --     case crumb of
---       Nothing -> putStrLn "No trail for this trail ID!"
+--       Nothing -> putStrLn "Cannot find this particular trail."
 --       Just (timestamp, features) ->
 --         V.forM_ features $ \feature -> do
 --           field_name <- getFieldName tdb (feature^.field)
@@ -54,7 +54,7 @@
 -- Another example program that writes a TrailDB:
 --
 -- @
---   {-# LANGUAGE OverloadedStrings #-}
+--   {-\# LANGUAGE OverloadedStrings \#-}
 --
 --   import System.TrailDB
 --
@@ -63,13 +63,13 @@
 --     cons <- newTrailDBCons "some-trail-db" (["currency", "order_amount", "item"] :: [String])
 --     addTrail cons ("aaaaaaaaaaaaaa00")   -- UUIDs are 16 bytes in length
 --                   1457049455             -- This is timestamp
---                   ["USD", "10.14", "Bacon & Cheese" :: String]
+--                   [\"USD\", "10.14", "Bacon & Cheese" :: String]
 --     addTrail cons ("aaaaaaaaaaaaaa00")   -- Same UUID as above, same customer ordered more
 --                   1457051221
---                   ["USD", "8.90", "Avocado Sandwich" :: String]
+--                   [\"USD\", "8.90", "Avocado Sandwich" :: String]
 --     addTrail cons ("aaaaaaaaaaaaaa02")
 --                   1457031239
---                   ["JPY", "2900", "Sun Lotion" :: String]
+--                   [\"JPY\", "2900", "Sun Lotion" :: String]
 --     closeTrailDBCons cons
 --
 --     -- TrailDB has been written to 'some-trail-db'
@@ -98,11 +98,6 @@ module System.TrailDB
   , dontneedTrailDB
   , willneedTrailDB
   , withTrailDB
-  -- * Low-level
-  , withRawTdb
-  , getRawTdb
-  , touchTdb
-  , TdbRaw
   -- * Accessing TrailDBs
   , makeCursor
   , stepCursor
@@ -122,6 +117,15 @@ module System.TrailDB
   , getItemByField
   , getValue
   , getItem
+  -- * C interop
+  , withRawTdb
+  , getRawTdb
+  , touchTdb
+  , withRawTdbCons
+  , getRawTdbCons
+  , touchTdbCons
+  , TdbRaw
+  , TdbConsRaw
   -- ** Taking apart `Feature`
   , field
   , value
@@ -129,8 +133,12 @@ module System.TrailDB
   -- * Data types
   , UUID
   , TrailID
+  , FieldID
   , Crumb
+  , Feature()
   , TdbField
+  , TdbVal
+  , TdbVersion
   , FieldName
   , FieldNameLike(..)
   , featureWord
@@ -190,6 +198,8 @@ import System.TrailDB.Internal
 
 -- Raw types (tdb_types.h)
 type TdbField = Word32
+-- | `FieldID` is indexes a field number.
+type FieldID = TdbField
 type TdbVal = Word64
 type TdbItem = Word64
 
@@ -311,6 +321,8 @@ type UnixTime = Word64
 -- | `TrailID` indexes a trail in a traildb. It can be converted to and back to
 -- `UUID` within a traildb.
 type TrailID = Word64
+-- | TrailDB version
+type TdbVersion = Word64
 
 -- | A single crumb is some event at certain time.
 --
@@ -372,14 +384,17 @@ instance VG.Vector V.Vector Feature where
 -- | `Feature` is isomorphic to `Word64` so it's safe to coerce between them. (see `featureWord`).
 instance V.Unbox Feature
 
-getUnixTime :: MonadIO m => m Word64
+-- | A helper function to get the current unix time.
+--
+-- May be useful when building TrailDBs if you don't have timestamps already.
+getUnixTime :: MonadIO m => m UnixTime
 getUnixTime = liftIO $ do
   now <- getPOSIXTime
   let t = floor now
   return t
 {-# LANGUAGE getUnixTime #-}
 
-field :: Lens' Feature TdbField
+field :: Lens' Feature FieldID
 field = lens get_it set_it
  where
   get_it (Feature f) = shim_tdb_item_to_field f
@@ -432,8 +447,6 @@ tdbThrowIfError action = do
 -- Close it with `closeTrailDBCons`. Garbage collector will close it eventually
 -- if you didn't do it yourself. You won't be receiving `FinalizationFailure`
 -- exception though if that fails when using the garbage collector.
---
--- @tdb_cons_new@.
 newTrailDBCons :: (FieldNameLike a, MonadIO m)
                => FilePath
                -> [a]
@@ -491,9 +504,14 @@ withBytestrings listing action =
       loop_it bs_ptr rest (idx+1)
   loop_it bs_ptr [] _ = action bs_ptr
 
+-- | Class of things that can be turned into rows and added with `addTrail`.
+--
+-- The native type inside traildb is the `ByteString`. The use of this
+-- typeclass can eliminate some noise when converting values to `ByteString`.
 class ToTdbRow r where
   toTdbRow :: r -> [B.ByteString]
 
+-- | Class of things that can be turned into a field in a TrailDB.
 class ToTdbRowField f where
   toTdbField :: f -> B.ByteString
 
@@ -533,10 +551,9 @@ instance ToTdbRowField f => ToTdbRow [f] where
   toTdbRow = fmap toTdbField
   {-# INLINE toTdbRow #-}
 
--- | Convenience type that lets you arbitrarily make
--- heterogenous list of things that implement `ToTdbRowField`
--- and subsequently `ToTdbRow`. Use this if plain lists are
--- not suitable (because they are monotyped) or your tuples
+-- | Convenience type that lets you arbitrarily make heterogenous list of
+-- things that implement `ToTdbRowField` and subsequently `ToTdbRow`. Use this
+-- if plain lists are not suitable (because they are monotyped) or your tuples
 -- are too long to implement `ToTdbRow`.
 data TdbConsRow a b = (:.) a b
 
@@ -547,7 +564,8 @@ instance (ToTdbRowField a, ToTdbRow b)
   toTdbRow (a :. b) = toTdbField a:toTdbRow b
   {-# INLINE toTdbRow #-}
 
--- | Convenience newtype to put things that you can `Show` in TrailDB. It implements `ToTdbRowField`.
+-- | Convenience newtype to put things that you can `Show` in TrailDB. It
+-- implements `ToTdbRowField`.
 newtype TdbShowable a = TdbShowable a
   deriving ( Functor, Foldable, Traversable, Typeable, Generic, Eq, Ord, Show, Read )
 
@@ -776,14 +794,15 @@ getMinTimestamp tdb = withTdb tdb "getMinTimestamp" tdb_min_timestamp
 getMaxTimestamp :: MonadIO m => Tdb -> m UnixTime
 getMaxTimestamp tdb = withTdb tdb "getMaxTimestamp" tdb_max_timestamp
 
-getFieldName :: MonadIO m => Tdb -> TdbField -> m FieldName
+-- | Given a field ID, returns its human-readable field name.
+getFieldName :: MonadIO m => Tdb -> FieldID -> m FieldName
 getFieldName tdb fid = withTdb tdb "getFieldName" $ \ptr -> do
   result <- tdb_get_field_name ptr fid
   when (result == nullPtr) $ throwM NoSuchFieldID
   B.packCString result
 
 -- | Given a field name, returns its `FieldID`.
-getFieldID :: (FieldNameLike a, MonadIO m) => Tdb -> a -> m TdbField
+getFieldID :: (FieldNameLike a, MonadIO m) => Tdb -> a -> m FieldID
 getFieldID tdb (encodeToFieldName -> field_name) = withTdb tdb "getFieldID" $ \ptr ->
   B.useAsCString field_name $ \field_name_cstr -> do
     alloca $ \field_ptr -> do
@@ -805,7 +824,7 @@ getValue tdb (Feature ft) = withTdb tdb "getValue" $ \ptr -> do
 {-# INLINE getValue #-}
 
 -- | Given a field ID and a human-readable value, turn it into `Feature` for that field ID.
-getItem :: MonadIO m => Tdb -> TdbField -> B.ByteString -> m Feature
+getItem :: MonadIO m => Tdb -> FieldID -> B.ByteString -> m Feature
 getItem tdb fid bs = withTdb tdb "getItem" $ \ptr -> do
   B.unsafeUseAsCStringLen bs $ \(cstr, len) -> do
     ft <- tdb_get_item ptr (fid+1) cstr (fromIntegral len)
@@ -823,15 +842,44 @@ getItemByField tdb (encodeToFieldName -> fid) bs = liftIO $ do
 
 -- | Returns the raw pointer to a TrailDB.
 --
--- You can pass this pointer to C code and use the normal traildb functions to
--- use it.
+-- You can pass this pointer to C code and use the C API of TrailDB to use it.
 --
 -- You become responsible for ensuring Haskell doesn't clean up and close the
--- managed `Tdb` handle. You can use `touchTdb` to do that.
+-- managed `Tdb` handle. You can use `touchTdb` or `withRawTdb` to deal with this.
 getRawTdb :: MonadIO m => Tdb -> m (Ptr TdbRaw)
 getRawTdb (Tdb cvar) = liftIO $ withCVar cvar $ \case
   Nothing -> error "getRawTdb: tdb is closed."
   Just tdbstate -> return (tdbPtr tdbstate)
+
+-- | Returns the raw pointer to a TrailDB construction handle.
+--
+-- Just as with `getRawTdb`, this pointer can be passed to C and used with the
+-- TrailDB C API.
+--
+-- Use `touchTdbCons` or `withRawTdbCons` to ensure the pointer is not garbage
+-- collected while you are using it.
+getRawTdbCons :: MonadIO m => TdbCons -> m (Ptr TdbConsRaw)
+getRawTdbCons (TdbCons cvar) = liftIO $ withCVar cvar $ \case
+  Nothing -> error "getRawTdbCons: tdb_cons is closed."
+  Just raw_ptr -> return raw_ptr
+
+-- | Touch a `TdbCons`.
+--
+-- Ensures that `TdbCons` has not been garbage collected at the point
+-- `touchTdbCons` is invoked. Has no other effect.
+touchTdbCons :: MonadIO m => TdbCons -> m ()
+touchTdbCons (TdbCons cvar) = liftIO $ withCVar cvar $ \case
+  Nothing -> return ()
+  Just raw_ptr -> touch raw_ptr
+
+-- | Run an action with a raw pointer to `TdbCons`.
+--
+-- The `TdbCons` is guaranteed not to be garbage collected while the given
+-- action is running.
+withRawTdbCons :: MonadIO m => TdbCons -> (Ptr TdbConsRaw -> IO a) -> m a
+withRawTdbCons tdb_cons action = do
+  ptr <- getRawTdbCons tdb_cons
+  liftIO $ finally (action ptr) (touch ptr)
 
 -- | Touch a `Tdb`.
 --
@@ -902,6 +950,6 @@ filterTrailDBDirectories = filterM $ \dir -> do
     Left exc -> throwM exc
     Right ok -> closeTrailDB ok >> return True
 
-getTdbVersion :: MonadIO m => Tdb -> m Word64
+getTdbVersion :: MonadIO m => Tdb -> m TdbVersion
 getTdbVersion tdb = withTdb tdb "getTdbVersion" tdb_version
 
