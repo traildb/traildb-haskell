@@ -1,7 +1,7 @@
 TrailDB Haskell bindings
 ========================
 
-![TrailDB logo](../blob/master/traildb_logo_512.png?raw=true)
+![TrailDB logo](traildb_logo_512.png?raw=true)
 
 These are the official Haskell bindings to [TrailDB](http://traildb.io/). Most
 of the API is covered. Check out System.TrailDB module for some examples and
