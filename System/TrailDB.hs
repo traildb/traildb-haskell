@@ -671,7 +671,7 @@ openTrailDB root = liftIO $ mask_ $
 --
 -- Internally may invoke system call \'madvise\' behind the scenes to operating system.
 --
--- This has no effects on semantics, only performance.
+-- This has no effect on semantics, only performance.
 dontneedTrailDB :: MonadIO m
                 => Tdb
                 -> m ()
@@ -681,7 +681,7 @@ dontneedTrailDB tdb = withTdb tdb "dontneedTrailDB" tdb_dontneed
 --
 -- Internally may invoke system call \'madvise\' behind the scenes to operating system.
 --
--- This has no effects on semantics, only performance.
+-- This has no effect on semantics, only performance.
 willneedTrailDB :: MonadIO m
                 => Tdb
                 -> m ()
