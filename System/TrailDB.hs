@@ -143,6 +143,7 @@ module System.TrailDB
   , FieldNameLike(..)
   , featureWord
   , featureTdbVal
+  , Cursor()
   , TdbCons()
   , Tdb()
   -- ** Time
@@ -248,7 +249,8 @@ foreign import ccall safe tdb_close
 foreign import ccall unsafe tdb_get_trail_id
   :: Ptr TdbRaw
   -> Ptr Word8
-  -> IO Word64
+  -> Ptr Word64
+  -> IO CInt
 foreign import ccall unsafe tdb_get_uuid
   :: Ptr TdbRaw
   -> Word64
@@ -767,11 +769,12 @@ getUUID tdb cid = withTdb tdb "getUUID" $ \ptr -> do
 getTrailID :: MonadIO m => Tdb -> UUID -> m TrailID
 getTrailID _ cookie | B.length cookie /= 16 = error "getTrailID: cookie must be 16 bytes in length."
 getTrailID tdb cookie = withTdb tdb "getTrailID" $ \ptr ->
-  B.unsafeUseAsCString cookie $ \cookie_str -> do
-    result <- tdb_get_trail_id ptr (castPtr cookie_str)
-    if result == 0xffffffffffffffff
-      then throwM NoSuchUUID
-      else return result
+  B.unsafeUseAsCString cookie $ \cookie_str ->
+    alloca $ \result_ptr -> do
+      result <- tdb_get_trail_id ptr (castPtr cookie_str) result_ptr
+      if result == 0
+        then peek result_ptr
+        else throwM NoSuchUUID
 {-# INLINE getTrailID #-}
 
 -- | Returns the number of cookies in `Tdb`
