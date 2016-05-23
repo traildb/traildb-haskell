@@ -19,7 +19,18 @@
 
 -- | Haskell bindings to trailDB library.
 --
--- Example program that reads a TrailDB using low-level cursor API:
+-- Minimal program that lists a TrailDB:
+-- @
+--   import qualified Data.ByteString as B
+--   import System.TrailDB
+--
+--   main :: IO ()
+--   main = do
+--     tdb <- openTrailDB "wikipedia-history-small.tdb"
+--     forEachTrailID tdb $ \tid -> print =<< getTrailBytestring tdb tid
+-- @
+--
+-- Example program that reads a TrailDB using low-level (faster) cursor API:
 --
 -- @
 --   import qualified Data.ByteString as B
@@ -109,8 +120,11 @@ module System.TrailDB
   , setCursor
   -- ** Iterating over TrailDB
   , forEachTrailID
+  , forEachTrailIDUUID
   , traverseEachTrailID
+  , traverseEachTrailIDUUID
   , foldTrailDB
+  , foldTrailDBUUID
   -- ** Basic querying
   , getNumTrails
   , getNumEvents
@@ -126,6 +140,10 @@ module System.TrailDB
   , getItemByField
   , getValue
   , getItem
+  -- * Time handling
+  , utcTimeToUnixTime
+  , posixSecondsToUnixTime
+  , dayToUnixTime
   -- * C interop
   , withRawTdb
   , getRawTdb
@@ -188,6 +206,7 @@ import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.Lazy as TL
+import Data.Time
 import Data.Time.Clock.POSIX
 import qualified Data.Vector as VS
 import qualified Data.Vector.Generic as VG
@@ -409,6 +428,20 @@ getUnixTime = liftIO $ do
   let t = floor now
   return t
 {-# LANGUAGE getUnixTime #-}
+
+-- | Converts `UTCTime` to `UnixTime`
+utcTimeToUnixTime :: UTCTime -> UnixTime
+utcTimeToUnixTime utc = floor $ utcTimeToPOSIXSeconds utc
+
+-- | Converts `POSIXTime` to `UnixTime`
+posixSecondsToUnixTime :: POSIXTime -> UnixTime
+posixSecondsToUnixTime = floor
+
+-- | Converts `Day` to `UnixTime`.
+--
+-- The time will be the first second of the `Day`.
+dayToUnixTime :: Day -> UnixTime
+dayToUnixTime day = utcTimeToUnixTime (UTCTime day 0)
 
 field :: Lens' Feature FieldID
 field = lens get_it set_it
@@ -768,10 +801,23 @@ forEachTrailID tdb action = do
   for_ [0..num_trails-1] $ \tid -> action tid
 {-# INLINEABLE forEachTrailID #-}
 
+-- | Same as `forEachTrailID` but passes UUID as well.
+forEachTrailIDUUID :: MonadIO m => Tdb -> (TrailID -> UUID -> m ()) -> m ()
+forEachTrailIDUUID tdb action = do
+  num_trails <- getNumTrails tdb
+  for_ [0..num_trails-1] $ \tid -> do
+    uuid <- getUUID tdb tid
+    action tid uuid
+
 -- | Same as `forEachTrailID` but arguments flipped.
 traverseEachTrailID :: MonadIO m => (TrailID -> m ()) -> Tdb -> m ()
 traverseEachTrailID action tdb = forEachTrailID tdb action
 {-# INLINE traverseEachTrailID #-}
+
+-- | Same as `traverseEachTrailID` but passes UUID as well.
+traverseEachTrailIDUUID :: MonadIO m => (TrailID -> UUID -> m ()) -> Tdb -> m ()
+traverseEachTrailIDUUID action tdb = forEachTrailIDUUID tdb action
+{-# INLINE traverseEachTrailIDUUID #-}
 
 -- | Fold TrailDB for each `TrailID`.
 --
@@ -780,7 +826,17 @@ foldTrailDB :: MonadIO m => (a -> TrailID -> m a) -> a -> Tdb -> m a
 foldTrailDB action initial tdb = do
   num_trails <- getNumTrails tdb
   foldlM action initial [0..num_trails-1]
-{-# INLINEABLE foldTrailDB #-} 
+{-# INLINEABLE foldTrailDB #-}
+
+-- | Same as `foldTrailDB` but passes UUID as well.
+foldTrailDBUUID :: MonadIO m => (a -> TrailID -> UUID -> m a) -> a -> Tdb -> m a
+foldTrailDBUUID action initial tdb = do
+  num_trails <- getNumTrails tdb
+  foldlM (\accum tid -> do
+           uuid <- getUUID tdb tid
+           action accum tid uuid)
+         initial [0..num_trails-1]
+{-# INLINEABLE foldTrailDBUUID #-}
 
 -- | Convenience function that returns a full trail in human-readable format.
 --
