@@ -31,6 +31,12 @@ Cabal is usually in the package repositories of your distribution.
 
     $ cabal install                      # Run this in the root of traildb-haskell
 
+    # Test it out!
+
+    $ cd examples
+    $ ghc tutorial_simple_traildb.hs -o tutorial
+    $ ./tutorial
+
 After this, bindings should be usable in other Haskell projects by requiring `traildb`.
 
 ### stack
@@ -46,6 +52,12 @@ not in your repositories.
 
     $ stack setup      # May be optional if you have GHC already installed and it can be used
     $ stack install
+
+    # Test it out!
+
+    $ cd examples
+    $ stack ghc -- tutorial_simple_traildb.hs -o tutorial
+    $ ./tutorial
 
 License
 -------
