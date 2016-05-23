@@ -19,7 +19,7 @@
 
 -- | Haskell bindings to trailDB library.
 --
--- Example program that reads a TrailDB:
+-- Example program that reads a TrailDB using low-level cursor API:
 --
 -- @
 --   import qualified Data.ByteString as B
@@ -99,9 +99,17 @@ module System.TrailDB
   , willneedTrailDB
   , withTrailDB
   -- * Accessing TrailDBs
+  -- ** High-level, slow, access
+  , FromTrail(..)
+  , getTrail
+  -- ** Lowerish-level, fast, access
   , makeCursor
   , stepCursor
   , setCursor
+  -- ** Iterating over TrailDB
+  , forEachTrailID
+  , traverseEachTrailID
+  , foldTrailDB
   -- ** Basic querying
   , getNumTrails
   , getNumEvents
@@ -170,17 +178,22 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Unsafe as B
 import qualified Data.ByteString.Lazy as BL
 import Data.Coerce
+import Data.Foldable ( for_, foldlM )
 import Data.Data
 import Data.IORef
+import qualified Data.Map.Strict as M
 import Data.Monoid
+import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.Lazy as TL
 import Data.Time.Clock.POSIX
+import qualified Data.Vector as VS
 import qualified Data.Vector.Generic as VG
 import qualified Data.Vector.Generic.Mutable as VGM
 import qualified Data.Vector.Unboxed as V
 import qualified Data.Vector.Unboxed.Mutable as VM
+import Data.Traversable ( for )
 import Data.Word
 import Foreign.C.String
 import Foreign.C.Types
@@ -714,6 +727,86 @@ makeCursor (Tdb mvar) = liftIO $ withCVar mvar $ \case
     void $ mkWeakIORef cursor_fin $ tdb_cursor_free cursor
     return $ Cursor cursor cursor_fin mvar
 {-# NOINLINE makeCursor #-}
+
+-- | Class of things that can be result from `getTrail`.
+class FromTrail a where
+  -- | Makes a result from a list of trails.
+  --
+  -- One crumb of a trail has timestamp and associative list of fields.
+  --
+  -- @
+  --     [(timestamp, [(fieldname1, value1), (fieldname2, value2), ...]
+  --     , ... ]
+  -- @
+  fromBytestringList :: [(UnixTime, [(B.ByteString, B.ByteString)])] -> a
+
+instance FromTrail [(UnixTime, [(B.ByteString, B.ByteString)])] where
+  fromBytestringList = id
+  {-# INLINE fromBytestringList #-}
+
+-- | Throws away timestamps.
+instance FromTrail [M.Map B.ByteString B.ByteString] where
+  fromBytestringList = fmap (M.fromList . snd)
+
+-- | Throws away timestamps and field names.
+instance FromTrail [[B.ByteString]] where
+  fromBytestringList = fmap (fmap snd . snd)
+
+-- | `Vector` version.
+instance FromTrail (VS.Vector (M.Map B.ByteString B.ByteString)) where
+  fromBytestringList = VS.fromList . fmap (M.fromList . snd)
+
+-- | Set of all values that appear in the trail.
+instance FromTrail (S.Set B.ByteString) where
+  fromBytestringList = S.fromList . concat . fmap (fmap snd . snd)
+
+-- | Convenience function that runs a function for each `TrailID` in TrailDB.
+forEachTrailID :: MonadIO m => Tdb -> (TrailID -> m ()) -> m ()
+forEachTrailID tdb action = do
+  num_trails <- getNumTrails tdb
+  for_ [0..num_trails-1] $ \tid -> action tid
+{-# INLINEABLE forEachTrailID #-}
+
+-- | Same as `forEachTrailID` but arguments flipped.
+traverseEachTrailID :: MonadIO m => (TrailID -> m ()) -> Tdb -> m ()
+traverseEachTrailID action tdb = forEachTrailID tdb action
+{-# INLINE traverseEachTrailID #-}
+
+-- | Fold TrailDB for each `TrailID`.
+--
+-- This is like `traverseEachTrailID` but lets you carry a folding value.
+foldTrailDB :: MonadIO m => (a -> TrailID -> m a) -> a -> Tdb -> m a
+foldTrailDB action initial tdb = do
+  num_trails <- getNumTrails tdb
+  foldlM action initial [0..num_trails-1]
+{-# INLINEABLE foldTrailDB #-} 
+
+-- | Convenience function that returns a full trail in human-readable format.
+--
+-- This is quite a bit slower than using a cursor (`makeCursor`, `setCursor`,
+-- `stepCursor`) but is simpler. If you don't need to go through bazillions of
+-- data really fast you might want to use this one.
+--
+-- See `FromTrail` for things that can be taken as a result.
+getTrail :: (FromTrail a, MonadIO m)
+         => Tdb
+         -> TrailID
+         -> m a
+getTrail tdb tid = liftIO $ do
+  cursor <- makeCursor tdb
+  setCursor cursor tid
+  fromBytestringList <$> exhaustCursor cursor
+ where
+  exhaustCursor :: Cursor -> IO [(UnixTime, [(B.ByteString, B.ByteString)])]
+  exhaustCursor cursor = do
+    stepCursor cursor >>= \case
+      Nothing -> return []
+      Just (unixtime, V.toList -> features) -> do
+        let field_ids = features <&> (^.field)
+        fieldnames <- for field_ids $ getFieldName tdb
+        valuenames <- for features $ getValue tdb
+        fmap ((unixtime, zip fieldnames valuenames):) $ exhaustCursor cursor
+{-# INLINEABLE getTrail #-}
 
 -- | Steps cursor forward in its trail.
 --

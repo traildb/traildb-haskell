@@ -29,6 +29,7 @@ library
                        System.TrailDB.Internal
   build-depends:       base       >=4.6 && <5.0
                       ,bytestring
+                      ,containers >=0.4 && <1.0
                       ,directory
                       ,lens
                       ,exceptions
