@@ -102,6 +102,7 @@ module System.TrailDB
   -- ** High-level, slow, access
   , FromTrail(..)
   , getTrail
+  , getTrailBytestring
   -- ** Lowerish-level, fast, access
   , makeCursor
   , stepCursor
@@ -807,6 +808,14 @@ getTrail tdb tid = liftIO $ do
         valuenames <- for features $ getValue tdb
         fmap ((unixtime, zip fieldnames valuenames):) $ exhaustCursor cursor
 {-# INLINEABLE getTrail #-}
+
+-- | Same as `getTrail` but not polymorphic in output.
+--
+-- Meant to be used for very quick throw-away programs where you don't want to
+-- spell out the type to be used (e.g. if you all you do is `print` the trail).
+getTrailBytestring :: MonadIO m => Tdb -> TrailID -> m [(UnixTime, [(B.ByteString, B.ByteString)])]
+getTrailBytestring = getTrail
+{-# INLINE getTrailBytestring #-}
 
 -- | Steps cursor forward in its trail.
 --
