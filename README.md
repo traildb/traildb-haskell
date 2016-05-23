@@ -67,7 +67,8 @@ These bindings are licensed under the MIT license.
 How to contribute or report bugs
 --------------------------------
 
-You can use our [GitHub page](https://github.com/SemanticSugar/traildb-haskell/) to report issues or pull requests. 
+Use our [GitHub page](https://github.com/SemanticSugar/traildb-haskell/) to
+report issues or to open pull requests.
 
 Example program
 ---------------
