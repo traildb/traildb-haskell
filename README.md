@@ -72,30 +72,5 @@ You can use our [GitHub page](https://github.com/SemanticSugar/traildb-haskell/)
 Example program
 ---------------
 
-    import qualified Data.ByteString as B
-    import qualified Data.Vector.Unboxed as V
-    import System.TrailDB
- 
-    main :: IO ()
-    main = do
-      tdb <- openTrailDB "some-trail-db"
-      number_of_trails <- getNumTrails tdb
- 
-      let arbitrarily_chosen_trail_id = 12345 `mod` number_of_trails
- 
-      cursor <- makeCursor tdb
-      setCursor cursor arbitrarily_chosen_trail_id
- 
-      -- Read the first event in the arbitrary chosen trail
-      crumb <- stepCursor cursor
-      case crumb of
-        Nothing -> putStrLn "Cannot find this particular trail."
-        Just (timestamp, features) ->
-          V.forM_ features $ \feature -> do
-            field_name <- getFieldName tdb (feature^.field)
-            putStr "Field: "
-            B.putStr field_name
-            putStr " contains value "
-            value <- getValue tdb feature
-            B.putStrLn value
+Check out `examples/tutorial_simple_traildb.hs` in this repository.
 
