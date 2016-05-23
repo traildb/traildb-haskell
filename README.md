@@ -4,8 +4,8 @@ TrailDB Haskell bindings
 ![TrailDB logo](traildb_logo_512.png?raw=true)
 
 These are the official Haskell bindings to [TrailDB](http://traildb.io/). Most
-of the API is covered. Check out System.TrailDB module for some examples and
-documentation.
+of the API is covered (with the notable exception of filters). Check out
+`System.TrailDB` module for some examples and documentation.
 
 How to build
 ------------
