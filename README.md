@@ -1,3 +1,5 @@
+[![Hackage](https://img.shields.io/hackage/v/traildb.svg)](https://hackage.haskell.org/package/traildb)
+
 TrailDB Haskell bindings
 ========================
 
