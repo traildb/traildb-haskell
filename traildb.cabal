@@ -18,7 +18,7 @@ extra-source-files:  README.md
 
 source-repository head
   type:                git
-  location:            https://github.com/SemanticSugar/traildb-haskell
+  location:            https://github.com/traildb/traildb-haskell
 
 flag use-ioref
   default:             False
