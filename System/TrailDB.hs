@@ -20,6 +20,7 @@
 -- | Haskell bindings to trailDB library.
 --
 -- Minimal program that lists a TrailDB:
+--
 -- @
 --   import qualified Data.ByteString as B
 --   import System.TrailDB
