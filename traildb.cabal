@@ -3,7 +3,7 @@ version:             0.1.0.0
 synopsis:            TrailDB bindings for Haskell
 description:         Check out README.md for information on these bindings.
                      .
-                     TrailDB project home page is at http://traildb.io/
+                     TrailDB project home page is at traildb.io
 license-file:        LICENSE
 license:             MIT
 author:              Mikko Juola
