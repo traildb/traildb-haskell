@@ -13,7 +13,7 @@ How to build
 These bindings can be installed using `cabal-install` or `stack` on Linux.
 
 Fetch the code in some way. You can clone
-[git://github.com/SemanticSugar/traildb-haskell]. Then follow these
+[https://github.com/SemanticSugar/traildb-haskell]. Then follow these
 instructions.
 
 You need at least `traildb`, `Judy` and `cmph` libraries installed to compile
