@@ -1,0 +1,17 @@
+language: haskell
+
+ghc:
+  - 7.8
+  - 7.6
+
+before_install:
+    - sudo apt-get install -qq update
+    - sudo apt-get install libjudy-dev libarchive-dev pkg-config libtool autoconf automake make git
+    - git clone https://github.com/traildb/traildb && cd traildb && ./autogen.sh && ./configure --prefix=/usr && make && sudo make install
+
+install:
+    - cabal install --only-dependencies
+
+script:
+    - cabal configure && cabal build
+
