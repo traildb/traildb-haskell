@@ -395,7 +395,9 @@ instance VGM.MVector VM.MVector Feature where
     result <- VGM.basicUnsafeNew sz
     return $ VM_Feature result
   {-# INLINE basicUnsafeRead #-}
-  basicUnsafeRead (VM_Feature w64) i = coerce <$> VGM.basicUnsafeRead w64 i
+  basicUnsafeRead (VM_Feature w64) i = do
+    result <- VGM.basicUnsafeRead w64 i
+    return $ coerce result
   {-# INLINE basicUnsafeWrite #-}
   basicUnsafeWrite (VM_Feature w64) i v =
     VGM.basicUnsafeWrite w64 i (coerce v)
@@ -412,8 +414,9 @@ instance VG.Vector V.Vector Feature where
     result <- VG.basicUnsafeThaw w64
     return $ coerce result
   {-# INLINE basicUnsafeIndexM #-}
-  basicUnsafeIndexM (V_Feature w64) idx =
-    fmap coerce $ VG.basicUnsafeIndexM w64 idx
+  basicUnsafeIndexM (V_Feature w64) idx = do
+    result <- VG.basicUnsafeIndexM w64 idx
+    return $ coerce result
   {-# INLINE basicUnsafeSlice #-}
   basicUnsafeSlice i1 i2 (V_Feature w64) =
     coerce $ VG.basicUnsafeSlice i1 i2 w64
@@ -797,14 +800,14 @@ instance FromTrail (S.Set B.ByteString) where
   fromBytestringList = S.fromList . concat . fmap (fmap snd . snd)
 
 -- | Convenience function that runs a function for each `TrailID` in TrailDB.
-forEachTrailID :: MonadIO m => Tdb -> (TrailID -> m ()) -> m ()
+forEachTrailID :: (Applicative m, MonadIO m) => Tdb -> (TrailID -> m ()) -> m ()
 forEachTrailID tdb action = do
   num_trails <- getNumTrails tdb
   for_ [0..num_trails-1] $ \tid -> action tid
 {-# INLINEABLE forEachTrailID #-}
 
 -- | Same as `forEachTrailID` but passes UUID as well.
-forEachTrailIDUUID :: MonadIO m => Tdb -> (TrailID -> UUID -> m ()) -> m ()
+forEachTrailIDUUID :: (Applicative m, MonadIO m) => Tdb -> (TrailID -> UUID -> m ()) -> m ()
 forEachTrailIDUUID tdb action = do
   num_trails <- getNumTrails tdb
   for_ [0..num_trails-1] $ \tid -> do
@@ -812,12 +815,12 @@ forEachTrailIDUUID tdb action = do
     action tid uuid
 
 -- | Same as `forEachTrailID` but arguments flipped.
-traverseEachTrailID :: MonadIO m => (TrailID -> m ()) -> Tdb -> m ()
+traverseEachTrailID :: (Applicative m, MonadIO m) => (TrailID -> m ()) -> Tdb -> m ()
 traverseEachTrailID action tdb = forEachTrailID tdb action
 {-# INLINE traverseEachTrailID #-}
 
 -- | Same as `traverseEachTrailID` but passes UUID as well.
-traverseEachTrailIDUUID :: MonadIO m => (TrailID -> UUID -> m ()) -> Tdb -> m ()
+traverseEachTrailIDUUID :: (Applicative m, MonadIO m) => (TrailID -> UUID -> m ()) -> Tdb -> m ()
 traverseEachTrailIDUUID action tdb = forEachTrailIDUUID tdb action
 {-# INLINE traverseEachTrailIDUUID #-}
 
