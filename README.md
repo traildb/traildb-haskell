@@ -18,10 +18,10 @@ Fetch the code in some way. You can clone
 [https://github.com/traildb/traildb-haskell]. Then follow these
 instructions.
 
-You need at least `traildb`, `Judy` and `cmph` libraries installed to compile
-and use these bindings. The latter two are dependencies of TrailDB itself so if
-you have TrailDB the C library installed properly, then most likely you don't
-need to do anything else regarding dependencies.
+You need at least `traildb` and `Judy` libraries installed to compile and use
+these bindings. `Judy` is a dependency of TrailDB itself so if you have TrailDB
+the C library installed properly, then most likely you don't need to do
+anything else regarding dependencies.
 
 ### cabal-install
 
