@@ -199,7 +199,7 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Unsafe as B
 import qualified Data.ByteString.Lazy as BL
 import Data.Coerce
-import Data.Foldable ( for_, foldlM )
+import Data.Foldable ( for_, foldlM, Foldable )
 import Data.Data
 import Data.IORef
 import qualified Data.Map.Strict as M
