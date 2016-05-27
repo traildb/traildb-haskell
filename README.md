@@ -1,4 +1,5 @@
 [![Hackage](https://img.shields.io/hackage/v/traildb.svg)](https://hackage.haskell.org/package/traildb)
+[![Travis CI](https://travis-ci.org/traildb/traildb-haskell.svg?branch=master)](https://travis-ci.org/traildb/traildb-haskell)
 
 TrailDB Haskell bindings
 ========================
