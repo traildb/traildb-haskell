@@ -187,6 +187,7 @@ module System.TrailDB
   , filterTrailDBDirectories )
   where
 
+import Control.Applicative
 import Control.Concurrent
 import Control.Lens hiding ( coerce )
 import Control.Monad
