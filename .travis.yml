@@ -6,8 +6,8 @@ ghc:
 
 before_install:
     - sudo apt-get -qq update
-    - sudo apt-get install libjudy-dev libarchive-dev pkg-config libtool autoconf automake make git
-    - git clone https://github.com/traildb/traildb && cd traildb && mkdir m4 && ./autogen.sh && ./configure --prefix=/usr && make && sudo make install
+    - sudo apt-get install libjudy-dev libarchive-dev pkg-config libtool autoconf automake make git clang
+    - git clone https://github.com/traildb/traildb && cd traildb && mkdir m4 && ./autogen.sh && CC=clang ./configure --prefix=/usr && make && sudo make install
 
 install:
     - cabal install --only-dependencies
