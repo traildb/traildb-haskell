@@ -224,7 +224,7 @@ import Foreign.Marshal.Array
 import Foreign.Ptr
 import Foreign.Storable
 import GHC.Generics
-import System.Directory
+import System.Directory hiding ( isSymbolicLink )
 import System.IO.Error
 import System.Posix.Files.ByteString
 
