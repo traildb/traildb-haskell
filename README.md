@@ -12,7 +12,8 @@ of the API is covered (with the notable exception of filters). Check out
 How to build
 ------------
 
-These bindings can be installed using `cabal-install` or `stack` on Linux.
+These bindings can be installed using `cabal-install` or `stack` on Linux. At
+least GHC 7.8 is required.
 
 Fetch the code in some way. You can clone
 [https://github.com/traildb/traildb-haskell]. Then follow these
