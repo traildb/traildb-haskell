@@ -904,6 +904,8 @@ stepCursor (Cursor cursor mvar finalizer) = liftIO $ do
 {-# INLINE stepCursor #-}
 
 -- | Same as `stepCursor` but returns the remaining trails on the cursor as a list.
+--
+-- Available since 0.1.1.0
 stepCursorList :: MonadIO m
                => Cursor
                -> m [Crumb]
