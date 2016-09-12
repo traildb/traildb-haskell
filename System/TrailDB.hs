@@ -118,6 +118,7 @@ module System.TrailDB
   -- ** Lowerish-level, fast, access
   , makeCursor
   , stepCursor
+  , stepCursorList
   , setCursor
   -- ** Iterating over TrailDB
   , forEachTrailID
@@ -901,6 +902,17 @@ stepCursor (Cursor cursor mvar finalizer) = liftIO $ do
 
     else return Nothing
 {-# INLINE stepCursor #-}
+
+-- | Same as `stepCursor` but returns the remaining trails on the cursor as a list.
+stepCursorList :: MonadIO m
+               => Cursor
+               -> m [Crumb]
+stepCursorList cursor = liftIO $ step_loop
+ where
+  step_loop = stepCursor cursor >>= \case
+    Just item -> (item:) <$> step_loop
+    _ -> return []
+{-# INLINE stepCursorList #-}
 
 -- | Puts cursor at the start of some trail.
 setCursor :: MonadIO m
