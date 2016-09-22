@@ -109,6 +109,7 @@ module System.TrailDB
   , getTdbVersion
   , dontneedTrailDB
   , willneedTrailDB
+  , randomTrailDB
   , withTrailDB
   -- * Accessing TrailDBs
   -- ** High-level, slow, access
@@ -271,6 +272,9 @@ foreign import ccall unsafe tdb_dontneed
   :: Ptr TdbRaw
   -> IO ()
 foreign import ccall unsafe tdb_willneed
+  :: Ptr TdbRaw
+  -> IO ()
+foreign import ccall unsafe tdb_random
   :: Ptr TdbRaw
   -> IO ()
 foreign import ccall unsafe tdb_init
@@ -731,6 +735,16 @@ dontneedTrailDB :: MonadIO m
                 => Tdb
                 -> m ()
 dontneedTrailDB tdb = withTdb tdb "dontneedTrailDB" tdb_dontneed
+
+-- | Hints that `Tdb` will not be accessed in near future.
+--
+-- Internally may invoke system call \'madvise\' behind the scenes to operating system.
+--
+-- This has no effect on semantics, only performance.
+randomTrailDB :: MonadIO m
+              => Tdb
+             -> m ()
+randomTrailDB tdb = withTdb tdb "randomTrailDB" tdb_random
 
 -- | Hints that `Tdb` will be walked over in near future.
 --
