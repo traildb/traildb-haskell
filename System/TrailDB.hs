@@ -216,7 +216,7 @@ import qualified Data.Vector.Generic as VG
 import qualified Data.Vector.Generic.Mutable as VGM
 import qualified Data.Vector.Unboxed as V
 import qualified Data.Vector.Unboxed.Mutable as VM
-import Data.Traversable ( for )
+import Data.Traversable
 import Data.Word
 import Foreign.C.String
 import Foreign.C.Types
