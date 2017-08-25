@@ -85,7 +85,7 @@ prepareTrailDB num_fields = do
 prepareCons :: Int -> IO (TdbCons, IO UUID, FilePath)
 prepareCons num_fields = do
   name <- replicateM 10 $ randomRIO ('a', 'z')
-  cons <- newTrailDBCons name (flip fmap [0..num_fields-1] show)
+  cons <- newTrailDBCons name (fmap show [0..num_fields-1])
   atomicModifyIORef' createdTrailDBs $ \old -> ( name:old, () )
 
   uuid_ref <- newIORef 0

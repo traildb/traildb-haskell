@@ -13,9 +13,9 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE RankNTypes #-}
 
 -- | Haskell bindings to trailDB library.
 --
@@ -190,7 +190,6 @@ module System.TrailDB
 
 import Control.Applicative
 import Control.Concurrent
-import Control.Lens hiding ( coerce )
 import Control.Monad
 import Control.Monad.Catch
 import Control.Monad.IO.Class
@@ -205,6 +204,7 @@ import Data.Data
 import Data.IORef
 import qualified Data.Map.Strict as M
 import Data.Monoid
+import Data.Profunctor
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
@@ -372,8 +372,30 @@ type Crumb = (UnixTime, V.Vector Feature)
 newtype Feature = Feature TdbItem
   deriving ( Eq, Ord, Show, Read, Typeable, Data, Generic, Storable )
 
+-- | Type synonym from lens package. Defined here so we can avoid lens dependency.
+type Iso s t a b = forall p f. (Profunctor p, Functor f) => p a (f b) -> p s (f t) 
+type Iso' s a = Iso s s a a
+
+iso :: (s -> a) -> (b -> t) -> Iso s t a b
+iso sa bt = dimap sa (fmap bt)
+{-# INLINE iso #-}
+
+-- | Type synonym from lens package.
+type Lens s t a b = forall f. Functor f => (a -> f b) -> s -> f t 
+type Lens' s a = Lens s s a a
+
+lens :: (s -> a) -> (s -> b -> t) -> Lens s t a b
+lens sa sbt afb s = sbt s <$> afb (sa s)
+{-# INLINE lens #-}
+
+
+
+(^.) :: s -> ((a -> Const a a) -> s -> Const a s) -> a
+s ^. l = getConst (l Const s)
+{-# INLINE (^.) #-}
+
 featureWord :: Iso' Feature Word64
-featureWord = iso (\(Feature w) -> w) (\w -> Feature w)
+featureWord = iso (\(Feature w) -> w) Feature
 {-# INLINE featureWord #-}
 
 featureTdbVal :: Iso' Feature TdbVal
@@ -402,6 +424,10 @@ instance VGM.MVector VM.MVector Feature where
   {-# INLINE basicUnsafeWrite #-}
   basicUnsafeWrite (VM_Feature w64) i v =
     VGM.basicUnsafeWrite w64 i (coerce v)
+
+  basicInitialize (VM_Feature w64) =
+    VGM.basicInitialize w64
+  {-# INLINE basicInitialize #-}
 
 instance VG.Vector V.Vector Feature where
   {-# INLINE basicLength #-}
@@ -433,7 +459,7 @@ getUnixTime = liftIO $ do
   now <- getPOSIXTime
   let t = floor now
   return t
-{-# LANGUAGE getUnixTime #-}
+{-# INLINE getUnixTime #-}
 
 -- | Converts `UTCTime` to `UnixTime`
 utcTimeToUnixTime :: UTCTime -> UnixTime
@@ -492,10 +518,9 @@ newtype TdbCons = TdbCons (MVar (Maybe (Ptr TdbConsRaw)))
 tdbThrowIfError :: MonadIO m => m CInt -> m ()
 tdbThrowIfError action = do
   result <- action
-  if result == 0
-    then return ()
-    else liftIO $ do err_string <- peekCString =<< tdb_error_str result
-                     throwM $ TrailDBError result err_string
+  unless (result == 0) $ liftIO $ do
+    err_string <- peekCString =<< tdb_error_str result
+    throwM $ TrailDBError result err_string
 
 -- | Create a new TrailDB and return TrailDB construction handle.
 --
@@ -553,7 +578,7 @@ withBytestrings listing action =
   allocaArray (length listing) $ \bs_ptr -> loop_it bs_ptr listing 0
  where
   loop_it :: Ptr (Ptr CChar) -> [B.ByteString] -> Int -> IO a
-  loop_it bs_ptr (bs:rest) idx = do
+  loop_it bs_ptr (bs:rest) idx =
     B.useAsCString bs $ \string_ptr -> do
       pokeElemOff bs_ptr idx string_ptr
       loop_it bs_ptr rest (idx+1)
@@ -644,7 +669,7 @@ addTrail (TdbCons mvar) cookie epoch (toTdbRow -> values) = liftIO $ withMVar mv
   Nothing -> error "addTrail: tdb_cons is closed."
   Just ptr ->
     B.unsafeUseAsCString cookie $ \cookie_ptr ->
-      withBytestrings values $ \values_ptr -> do
+      withBytestrings values $ \values_ptr ->
        withArray (fmap (fromIntegral . B.length) values) $ \values_length_ptr ->
         tdbThrowIfError $ tdb_cons_add
                             ptr
@@ -752,7 +777,18 @@ closeTrailDB (Tdb mvar) = liftIO $ mask_ $ modifyCVar_ mvar $ \case
   Nothing -> return Nothing
   Just (tdbPtr -> ptr) -> tdb_close ptr >> return Nothing
 
-data Cursor = Cursor !(Ptr TdbCursorRaw) !(IORef ()) !(MVar (Maybe TdbState))
+-- | Cursors are used to read a TrailDB.
+--
+-- It's permissible to make more than one cursor and use them on the same
+-- `Tdb` concurrently from many threads.
+--
+-- However, you should not use the same cursor across threads.
+--
+-- Most operations on `Tdb` lock it so it cannot be used concurrenly. The
+-- operations `setCursor`, `stepCursor` and `stepCursorList` don't lock anything.
+data Cursor = Cursor {-# UNPACK #-} !(Ptr TdbCursorRaw)
+                     !(IORef ())
+                     !(MVar (Maybe TdbState))
   deriving ( Eq, Typeable, Generic )
 
 -- | Creates a cursor to a trailDB.
@@ -798,7 +834,7 @@ instance FromTrail (VS.Vector (M.Map B.ByteString B.ByteString)) where
 
 -- | Set of all values that appear in the trail.
 instance FromTrail (S.Set B.ByteString) where
-  fromBytestringList = S.fromList . concat . fmap (fmap snd . snd)
+  fromBytestringList = S.fromList . concatMap (fmap snd . snd)
 
 -- | Convenience function that runs a function for each `TrailID` in TrailDB.
 forEachTrailID :: (Applicative m, MonadIO m) => Tdb -> (TrailID -> m ()) -> m ()
@@ -861,14 +897,16 @@ getTrail tdb tid = liftIO $ do
   fromBytestringList <$> exhaustCursor cursor
  where
   exhaustCursor :: Cursor -> IO [(UnixTime, [(B.ByteString, B.ByteString)])]
-  exhaustCursor cursor = do
+  exhaustCursor cursor =
     stepCursor cursor >>= \case
       Nothing -> return []
       Just (unixtime, V.toList -> features) -> do
         let field_ids = features <&> (^.field)
         fieldnames <- for field_ids $ getFieldName tdb
         valuenames <- for features $ getValue tdb
-        fmap ((unixtime, zip fieldnames valuenames):) $ exhaustCursor cursor
+        ((unixtime, zip fieldnames valuenames):) <$> exhaustCursor cursor
+
+  (<&>) = flip (<$>)
 {-# INLINEABLE getTrail #-}
 
 -- | Same as `getTrail` but not polymorphic in output.
@@ -909,7 +947,7 @@ stepCursor (Cursor cursor mvar finalizer) = liftIO $ do
 stepCursorList :: MonadIO m
                => Cursor
                -> m [Crumb]
-stepCursorList cursor = liftIO $ step_loop
+stepCursorList cursor = liftIO step_loop
  where
   step_loop = stepCursor cursor >>= \case
     Just item -> (item:) <$> step_loop
@@ -984,7 +1022,7 @@ getFieldName tdb fid = withTdb tdb "getFieldName" $ \ptr -> do
 -- | Given a field name, returns its `FieldID`.
 getFieldID :: (FieldNameLike a, MonadIO m) => Tdb -> a -> m FieldID
 getFieldID tdb (encodeToFieldName -> field_name) = withTdb tdb "getFieldID" $ \ptr ->
-  B.useAsCString field_name $ \field_name_cstr -> do
+  B.useAsCString field_name $ \field_name_cstr ->
     alloca $ \field_ptr -> do
       tdbThrowIfError $ tdb_get_field ptr field_name_cstr field_ptr
       result <- peek field_ptr
@@ -995,7 +1033,7 @@ getFieldID tdb (encodeToFieldName -> field_name) = withTdb tdb "getFieldID" $ \p
 -- Values in a TrailDB are integers which need to be mapped back to strings to
 -- be human-readable.
 getValue :: MonadIO m => Tdb -> Feature -> m B.ByteString
-getValue tdb (Feature ft) = withTdb tdb "getValue" $ \ptr -> do
+getValue tdb (Feature ft) = withTdb tdb "getValue" $ \ptr ->
   alloca $ \len_ptr -> do
     cstr <- tdb_get_item_value ptr ft len_ptr
     when (cstr == nullPtr) $ throwM NoSuchValue
@@ -1005,7 +1043,7 @@ getValue tdb (Feature ft) = withTdb tdb "getValue" $ \ptr -> do
 
 -- | Given a field ID and a human-readable value, turn it into `Feature` for that field ID.
 getItem :: MonadIO m => Tdb -> FieldID -> B.ByteString -> m Feature
-getItem tdb fid bs = withTdb tdb "getItem" $ \ptr -> do
+getItem tdb fid bs = withTdb tdb "getItem" $ \ptr ->
   B.unsafeUseAsCStringLen bs $ \(cstr, len) -> do
     ft <- tdb_get_item ptr (fid+1) cstr (fromIntegral len)
     if ft == 0
@@ -1106,11 +1144,9 @@ findTrailDBs filepath follow_symbolic_links = do
       Left exc | isDoesNotExistError exc -> filterChildDirectories prefix rest
       Left exc -> throwM exc
       Right is_symbolic_link ->
-        if is_dir
-          then (if (isSymbolicLink is_symbolic_link && follow_symbolic_links) ||
-                   (not $ isSymbolicLink is_symbolic_link)
-                  then modify (dir:) >> recurse dir >> filterChildDirectories prefix rest
-                  else filterChildDirectories prefix rest)
+        if is_dir && ((isSymbolicLink is_symbolic_link && follow_symbolic_links) ||
+                      not (isSymbolicLink is_symbolic_link))
+          then modify (dir:) >> recurse dir >> filterChildDirectories prefix rest
           else filterChildDirectories prefix rest
   filterChildDirectories _ [] = return ()
 

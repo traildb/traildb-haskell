@@ -35,9 +35,9 @@ library
                       ,bytestring
                       ,containers >=0.4 && <1.0
                       ,directory
-                      ,lens
                       ,exceptions
                       ,primitive
+                      ,profunctors
                       ,text
                       ,time
                       ,transformers

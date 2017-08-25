@@ -1,6 +1,5 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE CPP #-}
 
 module System.TrailDB.Internal
@@ -37,16 +36,17 @@ type CVar = MVar
 
 newCVar :: a -> IO (CVar a)
 #ifdef USE_IOREF
-newCVar thing = newIORef thing
+newCVar = newIORef
 #else
-newCVar thing = newMVar thing
+newCVar = newMVar
 #endif
+{-# INLINE newCVar #-}
 
 mkWeakCVar :: CVar a -> IO () -> IO (Weak (CVar a))
 #ifdef USE_IOREF
-mkWeakCVar cvar finalizer = mkWeakIORef cvar finalizer
+mkWeakCVar = mkWeakIORef
 #else
-mkWeakCVar cvar finalizer = mkWeakMVar cvar finalizer
+mkWeakCVar = mkWeakMVar
 #endif
 {-# INLINE mkWeakCVar #-}
 
@@ -79,7 +79,7 @@ withCVar cvar action = do
   item <- readIORef cvar
   action item
 #else
-withCVar cvar action = withMVar cvar action
+withCVar = withMVar
 #endif
 
 -- | Represents the raw TrailDB construction as used in C.
@@ -89,8 +89,8 @@ data TdbConsRaw
 data TdbRaw
 
 data TdbState = TdbState
-  { tdbPtr :: {-# UNPACK #-} !(Ptr TdbRaw)
-  , decodeBuffer :: {-# UNPACK #-} !(ForeignPtr Word64)
+  { tdbPtr           :: {-# UNPACK #-} !(Ptr TdbRaw)
+  , decodeBuffer     :: {-# UNPACK #-} !(ForeignPtr Word64)
   , decodeBufferSize :: {-# UNPACK #-} !Word64 }
 
 newtype Tdb = Tdb (CVar (Maybe TdbState))
