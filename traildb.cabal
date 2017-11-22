@@ -1,5 +1,5 @@
 name:                traildb
-version:             0.1.2.0
+version:             0.1.3.0
 synopsis:            TrailDB bindings for Haskell
 description:         Check out README.md for information on these bindings.
                      .
