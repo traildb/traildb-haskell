@@ -6,6 +6,7 @@
 {-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE DeriveFoldable #-}
@@ -116,6 +117,7 @@ module System.TrailDB
   , FromTrail(..)
   , getTrail
   , getTrailBytestring
+  , decodeCrumbBytestring
   -- ** Lowerish-level, fast, access
   , makeCursor
   , stepCursor
@@ -964,6 +966,17 @@ foldTrailDBUUID action initial tdb = do
            action accum tid uuid)
          initial [0..num_trails-1]
 {-# INLINEABLE foldTrailDBUUID #-}
+
+-- | Given a crumb, decodes it into list of strict bytestring with field, value pairs.
+decodeCrumbBytestring :: MonadIO m => Tdb -> Crumb -> m (UnixTime, [(B.ByteString, B.ByteString)])
+decodeCrumbBytestring tdb (unixtime, V.toList -> features) = liftIO $ do
+  let field_ids = features <&> (^.field)
+  fieldnames <- for field_ids $ getFieldName tdb
+  valuenames <- for features $ getValue tdb
+  pure (unixtime, zip fieldnames valuenames)
+ where
+  (<&>) = flip (<$>)
+{-# INLINE decodeCrumbBytestring #-}
 
 -- | Convenience function that returns a full trail in human-readable format.
 --
