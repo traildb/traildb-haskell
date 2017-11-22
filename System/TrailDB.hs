@@ -13,6 +13,7 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE RankNTypes #-}
@@ -125,6 +126,12 @@ module System.TrailDB
   , forEachTrailIDUUID
   , traverseEachTrailID
   , traverseEachTrailIDUUID
+  , forEachEvent
+  , forEachEventUUID
+  , traverseEachEvent
+  , traverseEachEventUUID
+  , foldEachEvent
+  , foldEachEventUUID
   , foldTrailDB
   , foldTrailDBUUID
   -- ** Basic querying
@@ -850,6 +857,84 @@ forEachTrailIDUUID tdb action = do
   for_ [0..num_trails-1] $ \tid -> do
     uuid <- getUUID tdb tid
     action tid uuid
+
+-- | Convenience function that goes through every single event in the TrailDB.
+forEachEvent :: (Applicative m, MonadIO m) => Tdb -> (TrailID -> Crumb -> m ()) -> m ()
+forEachEvent tdb action = do
+  num_trails <- getNumTrails tdb
+  cursor <- makeCursor tdb
+  for_ [0..num_trails-1] $ \tid -> do
+    setCursor cursor tid
+
+    let go = stepCursor cursor >>= \case
+               Nothing -> return ()
+               Just crumb -> action tid crumb >> go
+
+    go
+{-# INLINEABLE forEachEvent #-}
+
+-- | Convenience function that goes through every single event in the TrailDB, with UUID included.
+forEachEventUUID :: (Applicative m, MonadIO m) => Tdb -> (TrailID -> Crumb -> UUID -> m ()) -> m ()
+forEachEventUUID tdb action = do
+  num_trails <- getNumTrails tdb
+  cursor <- makeCursor tdb
+  for_ [0..num_trails-1] $ \tid -> do
+    setCursor cursor tid
+    uuid <- getUUID tdb tid
+
+    let go = stepCursor cursor >>= \case
+               Nothing -> return ()
+               Just crumb -> action tid crumb uuid >> go
+
+    go
+{-# INLINEABLE forEachEventUUID #-}
+
+-- | Same as `forEachEvent` but arguments flipped.
+traverseEachEvent :: (Applicative m, MonadIO m) => (TrailID -> Crumb -> m ()) -> Tdb -> m ()
+traverseEachEvent action tdb = forEachEvent tdb action
+{-# INLINE traverseEachEvent #-}
+
+-- | Same as `forEachEventUUID` but arguments flipped.
+traverseEachEventUUID :: (Applicative m, MonadIO m) => (TrailID -> Crumb -> UUID -> m ()) -> Tdb -> m ()
+traverseEachEventUUID action tdb = forEachEventUUID tdb action
+{-# INLINE traverseEachEventUUID #-}
+
+-- | Convenience function that goes through every single event in the TrailDB.
+foldEachEvent :: (Applicative m, MonadIO m) => Tdb -> (a -> TrailID -> Crumb -> m a) -> a -> m a
+foldEachEvent tdb action initial = do
+  num_trails <- getNumTrails tdb
+  cursor <- makeCursor tdb
+  goTrails cursor 0 num_trails initial
+ where
+  goTrails _ index num_trails !accum | index >= num_trails = pure accum
+  goTrails cursor index num_trails !accum = do
+    setCursor cursor index
+
+    let go accum = stepCursor cursor >>= \case
+                     Nothing -> pure accum
+                     Just crumb -> action accum index crumb >>= go
+
+    go accum >>= goTrails cursor (index+1) num_trails
+{-# INLINEABLE foldEachEvent #-}
+
+-- | Convenience function that goes through every single event in the TrailDB, includes UUID.
+foldEachEventUUID :: (Applicative m, MonadIO m) => Tdb -> (a -> TrailID -> Crumb -> UUID -> m a) -> a -> m a
+foldEachEventUUID tdb action initial = do
+  num_trails <- getNumTrails tdb
+  cursor <- makeCursor tdb
+  goTrails cursor 0 num_trails initial
+ where
+  goTrails _ index num_trails !accum | index >= num_trails = pure accum
+  goTrails cursor index num_trails !accum = do
+    setCursor cursor index
+    uuid <- getUUID tdb index
+
+    let go accum = stepCursor cursor >>= \case
+                     Nothing -> pure accum
+                     Just crumb -> action accum index crumb uuid >>= go
+
+    go accum >>= goTrails cursor (index+1) num_trails
+{-# INLINEABLE foldEachEventUUID #-}
 
 -- | Same as `forEachTrailID` but arguments flipped.
 traverseEachTrailID :: (Applicative m, MonadIO m) => (TrailID -> m ()) -> Tdb -> m ()
