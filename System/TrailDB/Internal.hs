@@ -21,7 +21,9 @@ import Data.IORef
 #else
 import Control.Concurrent.MVar
 #endif
+import qualified Data.ByteString as B
 import Data.Data
+import qualified Data.Vector as V
 import Data.Word
 import Foreign.ForeignPtr
 import Foreign.Ptr
@@ -91,7 +93,8 @@ data TdbRaw
 data TdbState = TdbState
   { tdbPtr           :: {-# UNPACK #-} !(Ptr TdbRaw)
   , decodeBuffer     :: {-# UNPACK #-} !(ForeignPtr Word64)
-  , decodeBufferSize :: {-# UNPACK #-} !Word64 }
+  , decodeBufferSize :: {-# UNPACK #-} !Word64
+  , fieldNames       :: !(V.Vector B.ByteString) }
 
 newtype Tdb = Tdb (CVar (Maybe TdbState))
   deriving ( Typeable, Generic )

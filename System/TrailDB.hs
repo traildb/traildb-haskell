@@ -204,6 +204,7 @@ import Control.Monad.Catch
 import Control.Monad.IO.Class
 import Control.Monad.Primitive
 import Control.Monad.Trans.State.Strict
+import Data.Bits
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Unsafe as B
 import qualified Data.ByteString.Lazy as BL
@@ -345,16 +346,6 @@ foreign import ccall unsafe tdb_cursor_free
 foreign import ccall unsafe shim_tdb_cursor_next
   :: Ptr TdbCursorRaw
   -> IO (Ptr TdbEventRaw)
-foreign import ccall unsafe shim_tdb_item_to_field
-  :: Word64
-  -> Word32
-foreign import ccall unsafe shim_tdb_item_to_val
-  :: Word64
-  -> Word64
-foreign import ccall unsafe shim_tdb_field_val_to_item
-  :: Word32
-  -> Word64
-  -> Word64
 
 data TdbCursorRaw
 data TdbEventRaw
@@ -487,15 +478,22 @@ dayToUnixTime day = utcTimeToUnixTime (UTCTime day 0)
 field :: Lens' Feature FieldID
 field = lens get_it set_it
  where
-  get_it (Feature f) = shim_tdb_item_to_field f
-  set_it original new = Feature $ shim_tdb_field_val_to_item new (original^.value)
+  get_it (Feature f) = fromIntegral $ f .&. 0x7f
+  set_it (Feature original) new = Feature $ (original .&. 0xffffffffffffff80) .|. (fromIntegral $ new .&. 0x7f)
 {-# INLINE field #-}
 
 value :: Lens' Feature TdbVal
 value = lens get_it set_it
  where
-  get_it (Feature f) = shim_tdb_item_to_val f
-  set_it original new = Feature $ shim_tdb_field_val_to_item (original^.field) new
+  get_it (Feature f) =
+    -- is it 32 bit item?
+    if f .&. 128 == 0
+      then (f `shiftR` 8) .&. 0xffffffff
+      else f `shiftR` 16
+  set_it (Feature original) new =
+    Feature $ if original .&. 128 == 0
+      then (original .&.  0x00000000000000ff) .|. (((new .&. 0xffffffff) `shiftL` 8))
+      else (original .&. 0x000000000000ffff) .|. (new `shiftL` 16)
 {-# INLINE value #-}
 
 -- | Class of things that can be used as a field name.
@@ -743,11 +741,20 @@ openTrailDB root = liftIO $ mask_ $
 
       buf <- mallocForeignPtrArray 1
 
+      -- Get all field names; later on we won't need to allocate
+      -- new bytestrings for functions like `getFieldName`.
+      num_fields <- tdb_num_fields tdb
+      field_names <- for [0..num_fields-1] $ \field_id -> do
+        result <- tdb_get_field_name tdb $ fromIntegral field_id
+        when (result == nullPtr) $ throwM CannotAllocateTrailDB
+        B.packCString result
+
       -- Protect concurrent access and attach a tdb_close to garbage collector
       mvar <- newCVar (Just TdbState {
           tdbPtr = tdb
         , decodeBuffer = buf
         , decodeBufferSize = 1
+        , fieldNames = VS.fromList field_names
         })
 
       void $ mkWeakCVar mvar $ modifyCVar_ mvar $ \case
@@ -968,15 +975,18 @@ foldTrailDBUUID action initial tdb = do
 {-# INLINEABLE foldTrailDBUUID #-}
 
 -- | Given a crumb, decodes it into list of strict bytestring with field, value pairs.
-decodeCrumbBytestring :: MonadIO m => Tdb -> Crumb -> m (UnixTime, [(B.ByteString, B.ByteString)])
-decodeCrumbBytestring tdb (unixtime, V.toList -> features) = liftIO $ do
-  let field_ids = features <&> (^.field)
-  fieldnames <- for field_ids $ getFieldName tdb
-  valuenames <- for features $ getValue tdb
-  pure (unixtime, zip fieldnames valuenames)
- where
-  (<&>) = flip (<$>)
 {-# INLINE decodeCrumbBytestring #-}
+decodeCrumbBytestring :: MonadIO m => Tdb -> Crumb -> m (UnixTime, [(B.ByteString, B.ByteString)])
+decodeCrumbBytestring (Tdb mvar) (unixtime, features) = liftIO $ withMVar mvar $ \case
+  Nothing -> error "decodeCrumbBytestring: traildb is closed."
+  Just tdbstate -> do
+    valuenames <- alloca $ \len_ptr -> do
+      for (V.toList features) $ \(Feature feat) -> do
+        cstr <- tdb_get_item_value (tdbPtr tdbstate) feat len_ptr
+        when (cstr == nullPtr) $ throwM NoSuchValue
+        len <- peek len_ptr
+        B.packCStringLen (cstr, fromIntegral len)
+    pure (unixtime, zip (tail $ VS.toList $ fieldNames tdbstate) valuenames)
 
 -- | Convenience function that returns a full trail in human-readable format.
 --
@@ -1111,11 +1121,14 @@ getMaxTimestamp :: MonadIO m => Tdb -> m UnixTime
 getMaxTimestamp tdb = withTdb tdb "getMaxTimestamp" tdb_max_timestamp
 
 -- | Given a field ID, returns its human-readable field name.
+{-# INLINE getFieldName #-}
 getFieldName :: MonadIO m => Tdb -> FieldID -> m FieldName
-getFieldName tdb fid = withTdb tdb "getFieldName" $ \ptr -> do
-  result <- tdb_get_field_name ptr fid
-  when (result == nullPtr) $ throwM NoSuchFieldID
-  B.packCString result
+getFieldName (Tdb mvar) (fromIntegral -> !fid) = liftIO $ withCVar mvar $ \case
+  Nothing -> error $ "getFieldName: tdb is closed."
+  Just (fieldNames -> field_names) ->
+    if fid < 0 || fid >= VS.length field_names
+      then error "getFieldName: requested field is out of range."
+      else return $ field_names `VS.unsafeIndex` fid
 
 -- | Given a field name, returns its `FieldID`.
 getFieldID :: (FieldNameLike a, MonadIO m) => Tdb -> a -> m FieldID
